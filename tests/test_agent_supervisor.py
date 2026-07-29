@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -15,6 +17,7 @@ from agents.models import (
     CommandResult,
     GitStatus,
     ReviewResult,
+    SecurityResult,
     ValidationResult,
 )
 from agents.supervisor import Supervisor, UnsafeRepositoryError
@@ -189,6 +192,50 @@ class SupervisorTests(unittest.TestCase):
             exit_code = arc3_agent.run(["status"])
 
         self.assertEqual(exit_code, arc3_agent.EXIT_USAGE)
+
+    def test_security_review_primary_command_and_alias_are_equivalent(self):
+        result = SecurityResult(
+            changed_files=("agents/security.py",),
+            findings=(),
+            files_inspected=("agents/security.py",),
+        )
+        fake_supervisor = Mock()
+        fake_supervisor.security_review.return_value = result
+        outputs = {}
+
+        with patch(
+            "arc3_agent.load_supervisor",
+            return_value=fake_supervisor,
+        ):
+            for command in ("security-review", "security"):
+                for json_flag in (False, True):
+                    arguments = [command]
+                    if json_flag:
+                        arguments.append("--json")
+                    output = StringIO()
+                    with redirect_stdout(output):
+                        exit_code = arc3_agent.run(arguments)
+                    self.assertEqual(exit_code, arc3_agent.EXIT_SUCCESS)
+                    outputs[(command, json_flag)] = output.getvalue()
+
+        self.assertEqual(
+            outputs[("security-review", False)],
+            outputs[("security", False)],
+        )
+        self.assertEqual(
+            outputs[("security-review", True)],
+            outputs[("security", True)],
+        )
+        self.assertEqual(fake_supervisor.security_review.call_count, 4)
+
+    def test_cli_help_documents_primary_security_review_command(self):
+        help_text = arc3_agent.build_parser().format_help()
+
+        self.assertIn("security-review", help_text)
+        self.assertIn(
+            "Alias for the v2 security-review command.",
+            help_text,
+        )
 
 
 if __name__ == "__main__":

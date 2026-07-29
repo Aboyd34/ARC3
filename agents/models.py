@@ -143,3 +143,87 @@ class SupervisionReport:
             ),
             "notes": list(self.notes),
         }
+
+
+@dataclass(frozen=True)
+class PlanResult:
+    task_title: str
+    branch: str
+    changed_files: tuple[str, ...]
+    relevant_files: tuple[str, ...]
+    steps: tuple[str, ...]
+    validation_commands: tuple[tuple[str, ...], ...]
+    warnings: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task_title": self.task_title,
+            "branch": self.branch,
+            "changed_files": list(self.changed_files),
+            "relevant_files": list(self.relevant_files),
+            "steps": list(self.steps),
+            "validation_commands": [
+                list(command) for command in self.validation_commands
+            ],
+            "warnings": list(self.warnings),
+        }
+
+
+@dataclass(frozen=True)
+class AgentFinding:
+    severity: str
+    category: str
+    message: str
+    path: str = ""
+    line: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class CodeReviewResult:
+    changed_files: tuple[str, ...]
+    findings: tuple[AgentFinding, ...]
+    files_inspected: tuple[str, ...]
+    skipped_files: tuple[str, ...] = ()
+
+    @property
+    def passed(self) -> bool:
+        return not any(
+            finding.severity in {"ERROR", "BLOCKER"}
+            for finding in self.findings
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "passed": self.passed,
+            "changed_files": list(self.changed_files),
+            "files_inspected": list(self.files_inspected),
+            "skipped_files": list(self.skipped_files),
+            "findings": [finding.to_dict() for finding in self.findings],
+        }
+
+
+@dataclass(frozen=True)
+class SecurityResult:
+    changed_files: tuple[str, ...]
+    findings: tuple[AgentFinding, ...]
+    files_inspected: tuple[str, ...]
+    skipped_files: tuple[str, ...] = ()
+
+    @property
+    def passed(self) -> bool:
+        return not any(
+            finding.severity in {"ERROR", "BLOCKER", "HIGH", "CRITICAL"}
+            for finding in self.findings
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "passed": self.passed,
+            "changed_files": list(self.changed_files),
+            "files_inspected": list(self.files_inspected),
+            "skipped_files": list(self.skipped_files),
+            "findings": [finding.to_dict() for finding in self.findings],
+        }

@@ -14,7 +14,10 @@ from agents.models import (
     ValidationResult,
 )
 from agents.prompt_builder import PromptBuilder
+from agents.planner import PlannerAgent
 from agents.report import save_report
+from agents.reviewer import CodeReviewAgent
+from agents.security import SecurityAgent
 from agents.validators import Validator
 
 
@@ -42,6 +45,21 @@ class Supervisor:
             self.project_path,
             configuration,
         )
+        self.planner_agent = PlannerAgent(
+            self.project_path,
+            configuration,
+            self.git,
+        )
+        self.code_review_agent = CodeReviewAgent(
+            self.project_path,
+            configuration,
+            self.git,
+        )
+        self.security_agent = SecurityAgent(
+            self.project_path,
+            configuration,
+            self.git,
+        )
 
     def status(self) -> GitStatus:
         return self.git.inspect()
@@ -50,6 +68,18 @@ class Supervisor:
         status = self.status()
         self._require_safe_repository(status, "prepare")
         return self.prompt_builder.save(task_title, status.branch)
+
+    def plan(self, task_title: str):
+        """Return a deterministic local implementation plan."""
+        return self.planner_agent.run(task_title)
+
+    def code_review(self):
+        """Run the v2 deterministic source review agent."""
+        return self.code_review_agent.run()
+
+    def security_review(self):
+        """Run the v2 deterministic security agent."""
+        return self.security_agent.run()
 
     def validate(self) -> ValidationResult:
         return self.validator.run_all()
