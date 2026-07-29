@@ -6,6 +6,7 @@
 )
 
 from app.pages.windows.processes_tab import ProcessesTab
+from app.pages.windows.services_tab import ServicesTab
 from app.pages.windows.startup_tab import StartupTab
 from app.pages.windows_page import WindowsPage
 
@@ -33,6 +34,7 @@ class WindowsWorkspace(QWidget):
 
         self.overview_tab = WindowsPage()
         self.processes_tab = ProcessesTab()
+        self.services_tab = ServicesTab()
         self.startup_tab = StartupTab()
 
         self.tabs.addTab(
@@ -45,10 +47,7 @@ class WindowsWorkspace(QWidget):
         )
 
         self.tabs.addTab(
-            self.create_future_tab(
-                "Services",
-                "Windows service controls will be added here.",
-            ),
+            self.services_tab,
             "Services",
         )
 
