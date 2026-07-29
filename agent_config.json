@@ -1,0 +1,27 @@
+{
+  "project_name": "ARC3",
+  "protected_branches": ["main", "master"],
+  "allowed_validation_commands": [
+    ["python", "-m", "compileall", "app"],
+    ["python", "-m", "unittest", "discover", "-s", "tests", "-v"],
+    ["git", "diff", "--check"],
+    ["git", "status", "--short"]
+  ],
+  "command_timeout_seconds": 180,
+  "maximum_changed_files": 40,
+  "forbidden_file_patterns": [
+    ".env",
+    "*.pem",
+    "*.key",
+    "*credentials*",
+    "*secret*",
+    "*token*"
+  ],
+  "ignored_paths": [
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    ".venv",
+    "venv"
+  ]
+}
