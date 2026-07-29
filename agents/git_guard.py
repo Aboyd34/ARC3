@@ -94,11 +94,18 @@ class GitGuard:
         return result.stdout.strip() if result.passed else ""
 
     def diff_stat(self) -> str:
-        result = self._run_git(("diff", "--stat"))
+        result = self._run_git(("diff", "HEAD", "--stat", "--"))
         return result.stdout.strip() if result.passed else ""
 
     def diff_check(self) -> CommandResult:
-        return self._run_git(("diff", "--check"))
+        return self._run_git(("diff", "HEAD", "--check", "--"))
+
+    def diff_text(self) -> str:
+        """Return tracked working-tree changes using fixed Git arguments."""
+        result = self._run_git(
+            ("diff", "HEAD", "--no-ext-diff", "--unified=0", "--")
+        )
+        return result.stdout if result.passed else ""
 
     def _working_tree(self) -> tuple[list[str], list[str], list[str]]:
         result = self._run_git(

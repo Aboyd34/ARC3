@@ -9,6 +9,8 @@ from agents.configuration import (
     ConfigurationError,
 )
 from agents.report import (
+    engineering_review_text,
+    plan_text,
     print_json,
     review_text,
     status_text,
@@ -34,6 +36,12 @@ def build_parser() -> argparse.ArgumentParser:
   python arc3_agent.py validate --json
   python arc3_agent.py review
   python arc3_agent.py review --json
+  python arc3_agent.py code-review
+  python arc3_agent.py code-review --json
+  python arc3_agent.py security-review
+  python arc3_agent.py security-review --json
+  python arc3_agent.py security
+  python arc3_agent.py security --json
   python arc3_agent.py supervise
   python arc3_agent.py supervise --json
 """
@@ -52,6 +60,15 @@ def build_parser() -> argparse.ArgumentParser:
         ("validate", "Run only configured validation commands."),
         ("review", "Review current Git changes deterministically."),
         ("supervise", "Run status, review, and validation."),
+        ("code-review", "Run the v2 deterministic code review agent."),
+        (
+            "security-review",
+            "Run the v2 deterministic security review agent.",
+        ),
+        (
+            "security",
+            "Alias for the v2 security-review command.",
+        ),
     ):
         subparser = subparsers.add_parser(name, help=help_text)
         subparser.add_argument(
@@ -69,6 +86,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Print the saved prompt path as JSON.",
+    )
+    plan = subparsers.add_parser(
+        "plan",
+        help="Build a deterministic local implementation plan.",
+    )
+    plan.add_argument("task_title", help="Task title to plan.")
+    plan.add_argument(
+        "--json",
+        action="store_true",
+        help="Print JSON output.",
     )
     return parser
 
@@ -113,6 +140,37 @@ def run(arguments: list[str] | None = None) -> int:
         payload = {"saved_prompt": str(path)}
         print(print_json(payload) if args.json else f"Saved prompt: {path}")
         return EXIT_SUCCESS
+
+    if args.command == "plan":
+        try:
+            plan = supervisor.plan(args.task_title)
+        except ValueError as error:
+            print(f"Planning error: {error}", file=sys.stderr)
+            return EXIT_USAGE
+        print(
+            print_json(plan.to_dict())
+            if args.json
+            else plan_text(plan)
+        )
+        return EXIT_SUCCESS
+
+    if args.command == "code-review":
+        result = supervisor.code_review()
+        print(
+            print_json(result.to_dict())
+            if args.json
+            else engineering_review_text("Code Review Agent", result)
+        )
+        return EXIT_SUCCESS if result.passed else EXIT_FAILED
+
+    if args.command in {"security-review", "security"}:
+        result = supervisor.security_review()
+        print(
+            print_json(result.to_dict())
+            if args.json
+            else engineering_review_text("Security Agent", result)
+        )
+        return EXIT_SUCCESS if result.passed else EXIT_FAILED
 
     if args.command == "validate":
         validation = supervisor.validate()

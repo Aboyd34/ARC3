@@ -5,8 +5,11 @@ from pathlib import Path
 from typing import Any
 
 from agents.models import (
+    CodeReviewResult,
     GitStatus,
+    PlanResult,
     ReviewResult,
+    SecurityResult,
     SupervisionReport,
     ValidationResult,
 )
@@ -92,6 +95,51 @@ def review_text(review: ReviewResult) -> str:
     lines.append(
         "Semantic correctness still requires human review."
     )
+    return "\n".join(lines)
+
+
+def plan_text(plan: PlanResult) -> str:
+    lines = [
+        f"Task: {plan.task_title}",
+        f"Branch: {plan.branch or '(detached/unknown)'}",
+        "Relevant files:",
+        *(f"- {path}" for path in plan.relevant_files),
+        "Plan:",
+        *(f"{index}. {step}" for index, step in enumerate(plan.steps, 1)),
+        "Validation:",
+        *(
+            f"- {command_text(command)}"
+            for command in plan.validation_commands
+        ),
+    ]
+    if plan.warnings:
+        lines.extend(("Warnings:", *(f"- {item}" for item in plan.warnings)))
+    return "\n".join(lines)
+
+
+def engineering_review_text(
+    title: str,
+    result: CodeReviewResult | SecurityResult,
+) -> str:
+    lines = [
+        title,
+        f"Result: {'PASS' if result.passed else 'FAIL'}",
+        f"Changed files: {len(result.changed_files)}",
+        f"Files inspected: {len(result.files_inspected)}",
+        f"Files skipped: {len(result.skipped_files)}",
+        "Findings:",
+    ]
+    if not result.findings:
+        lines.append("- None")
+    for finding in result.findings:
+        location = finding.path
+        if location and finding.line is not None:
+            location += f":{finding.line}"
+        lines.append(
+            f"- [{finding.severity}] {finding.category}"
+            + (f" ({location})" if location else "")
+            + f": {finding.message}"
+        )
     return "\n".join(lines)
 
 
