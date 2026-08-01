@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.pages.dashboard_page import DashboardPage
+from app.pages.android_workspace import AndroidWorkspace
 from app.pages.settings_page import SettingsPage
 from app.pages.windows.windows_workspace import WindowsWorkspace
 from app.settings import AppSettings
@@ -67,15 +68,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(DashboardPage())
         self.pages.addWidget(WindowsWorkspace())
 
-        self.pages.addWidget(
-            PlaceholderPage(
-                "Android Toolkit",
-                (
-                    "ADB, Fastboot, device information, "
-                    "and file controls."
-                ),
-            )
-        )
+        self.pages.addWidget(AndroidWorkspace())
 
         self.pages.addWidget(
             PlaceholderPage(
