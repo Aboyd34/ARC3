@@ -97,6 +97,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print JSON output.",
     )
+    execute = subparsers.add_parser(
+        "execute",
+        help="Run an explicitly approved Codex implementation task.",
+    )
+    execute.add_argument("task_title", help="Task title for Codex.")
+    execute.add_argument(
+        "--approve",
+        action="store_true",
+        help="Confirm that Codex may edit this workspace for this task.",
+    )
     return parser
 
 
@@ -152,6 +162,19 @@ def run(arguments: list[str] | None = None) -> int:
             if args.json
             else plan_text(plan)
         )
+        return EXIT_SUCCESS
+
+    if args.command == "execute":
+        try:
+            result = supervisor.execute_codex(args.task_title, args.approve)
+        except UnsafeRepositoryError as error:
+            print(f"Safety rejection: {error}", file=sys.stderr)
+            return EXIT_UNSAFE
+        if result.final_response:
+            print(result.final_response)
+        if not result.success:
+            print(f"Codex execution error: {result.error}", file=sys.stderr)
+            return EXIT_FAILED
         return EXIT_SUCCESS
 
     if args.command == "code-review":

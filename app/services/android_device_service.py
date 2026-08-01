@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.services.android_wrappers import AdbWrapper, FastbootWrapper
 from app.services.device_discovery import DeviceDiscoveryAgent
+from app.services.device_hardware import DeviceHardwareVerifier
 from app.services.device_models import OperationType, ProfessionalOperationRequest
 from app.services.servicing_orchestrator import ServicingOrchestrator
 
@@ -13,9 +14,11 @@ class AndroidDeviceService:
         self,
         discovery: DeviceDiscoveryAgent | None = None,
         orchestrator: ServicingOrchestrator | None = None,
+        hardware_verifier: DeviceHardwareVerifier | None = None,
     ) -> None:
         self.discovery = discovery or DeviceDiscoveryAgent()
         self.orchestrator = orchestrator or ServicingOrchestrator()
+        self.hardware_verifier = hardware_verifier or DeviceHardwareVerifier()
         self.devices_by_key = {}
 
     def collect_devices(self) -> dict[str, object]:
@@ -58,6 +61,12 @@ class AndroidDeviceService:
             ownership_confirmed=ownership_confirmed,
         )
         return self.orchestrator.handle(request, device)
+
+    def verify_hardware(self, serial: str, mode: str):
+        device = self.devices_by_key.get((serial, mode))
+        if device is None:
+            raise RuntimeError("Refresh devices and select an available device first.")
+        return self.hardware_verifier.verify(device)
 
     parse_adb_devices = staticmethod(
         lambda output: [AndroidDeviceService._legacy(item) for item in AdbWrapper.parse_devices(output)]

@@ -16,15 +16,46 @@ class CommandRunner:
         try:
             result = subprocess.run(
                 list(arguments), capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
                 timeout=self.timeout_seconds, check=False,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-        except (OSError, subprocess.TimeoutExpired) as error:
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(
+                f"{arguments[0]} timed out after {self.timeout_seconds} seconds."
+            ) from error
+        except PermissionError as error:
+            raise RuntimeError(f"Access denied while running {arguments[0]}.") from error
+        except OSError as error:
             raise RuntimeError(f"Unable to run {arguments[0]}: {error}") from error
         if result.returncode != 0:
             message = result.stderr.strip() or "Unknown command error"
             raise RuntimeError(f"{arguments[0]} failed: {message}")
         return result.stdout
+
+    def run_combined(self, arguments: Sequence[str]) -> str:
+        """Run a command whose informational output may use stderr."""
+        try:
+            result = subprocess.run(
+                list(arguments), capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+                timeout=self.timeout_seconds, check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(
+                f"{arguments[0]} timed out after {self.timeout_seconds} seconds."
+            ) from error
+        except PermissionError as error:
+            raise RuntimeError(f"Access denied while running {arguments[0]}.") from error
+        except OSError as error:
+            raise RuntimeError(f"Unable to run {arguments[0]}: {error}") from error
+        output = "\n".join(
+            part.strip() for part in (result.stdout, result.stderr) if part.strip()
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"{arguments[0]} failed: {output or 'Unknown command error'}")
+        return output
 
 
 class AdbWrapper:
@@ -43,6 +74,23 @@ class AdbWrapper:
         if not self.executable:
             raise RuntimeError("ADB was not found in PATH.")
         self.runner.run([self.executable, "-s", serial, "reboot", target])
+
+    def read_properties(self, serial: str) -> dict[str, str]:
+        if not self.executable:
+            raise RuntimeError("ADB was not found in PATH.")
+        output = self.runner.run([self.executable, "-s", serial, "shell", "getprop"])
+        return self.parse_properties(output)
+
+    @staticmethod
+    def parse_properties(output: str) -> dict[str, str]:
+        properties = {}
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("[") or "]: [" not in line or not line.endswith("]"):
+                continue
+            key, value = line[1:-1].split("]: [", 1)
+            properties[key] = value
+        return properties
 
     @staticmethod
     def parse_devices(output: str) -> list[DeviceState]:
@@ -99,6 +147,27 @@ class FastbootWrapper:
         if target:
             arguments.append(target)
         self.runner.run(arguments)
+
+    def read_variables(self, serial: str) -> dict[str, str]:
+        if not self.executable:
+            raise RuntimeError("Fastboot was not found in PATH.")
+        output = self.runner.run_combined([
+            self.executable, "-s", serial, "getvar", "all",
+        ])
+        return self.parse_variables(output)
+
+    @staticmethod
+    def parse_variables(output: str) -> dict[str, str]:
+        variables = {}
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if line.startswith("(bootloader) "):
+                line = line[len("(bootloader) "):]
+            if ":" not in line or line.lower().startswith("finished."):
+                continue
+            key, value = line.split(":", 1)
+            variables[key.strip()] = value.strip()
+        return variables
 
     @staticmethod
     def parse_devices(output: str) -> list[DeviceState]:

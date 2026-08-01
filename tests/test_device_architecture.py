@@ -1,12 +1,13 @@
 import json
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
+from uuid import uuid4
 
 from app.services.android_audit import AndroidAuditLogger
-from app.services.android_wrappers import SamsungDownloadWrapper
+from app.services.android_wrappers import AdbWrapper, FastbootWrapper, SamsungDownloadWrapper
 from app.services.device_discovery import DeviceDiscoveryAgent
+from app.services.device_hardware import DeviceHardwareVerifier
 from app.services.device_models import (
     DeviceMode, DeviceState, OperationType, ProfessionalOperationRequest,
 )
@@ -15,6 +16,41 @@ from app.services.servicing_orchestrator import ServicingOrchestrator
 
 
 class DeviceArchitectureTests(unittest.TestCase):
+    def test_adb_property_parser(self):
+        values = AdbWrapper.parse_properties(
+            "[ro.product.model]: [Pixel 8]\n[ro.serialno]: [ABC123]\ninvalid"
+        )
+        self.assertEqual(values["ro.product.model"], "Pixel 8")
+        self.assertEqual(values["ro.serialno"], "ABC123")
+
+    def test_fastboot_variable_parser(self):
+        values = FastbootWrapper.parse_variables(
+            "(bootloader) product:panther\n(bootloader) serialno:ABC123\nFinished. Total time: 0.1s"
+        )
+        self.assertEqual(values, {"product": "panther", "serialno": "ABC123"})
+
+    def test_hardware_verification_matches_adb_serial(self):
+        adb = Mock()
+        adb.read_properties.return_value = {
+            "ro.serialno": "ABC123",
+            "ro.product.model": "Pixel 8",
+            "ro.hardware": "tensor",
+        }
+        device = DeviceState("ABC123", DeviceMode.ADB, "device", authorized=True)
+        result = DeviceHardwareVerifier(adb=adb).verify(device)
+        self.assertTrue(result.success)
+        self.assertEqual(result.data["verification"], "Verified")
+
+    def test_hardware_verification_flags_serial_mismatch(self):
+        fastboot = Mock()
+        fastboot.read_variables.return_value = {
+            "serialno": "OTHER", "product": "panther",
+        }
+        device = DeviceState("ABC123", DeviceMode.FASTBOOT, "fastboot")
+        result = DeviceHardwareVerifier(fastboot=fastboot).verify(device)
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "verification_incomplete")
+
     def test_discovery_unifies_and_deduplicates_wrappers(self):
         device = DeviceState("ABC", DeviceMode.ADB, "device", authorized=True)
         adb = Mock(executable="adb.exe")
@@ -51,19 +87,25 @@ class DeviceArchitectureTests(unittest.TestCase):
         audit.record.assert_called_once()
 
     def test_audit_redacts_sensitive_keys(self):
+        serial = f"TEST-{uuid4().hex}"
         request = ProfessionalOperationRequest(
-            "CASE-1", "TECH-1", OperationType.READ_INFO, "ABC",
+            "CASE-1", "TECH-1", OperationType.READ_INFO, serial,
             authorization_reference="private-reference",
         )
-        device = DeviceState("ABC", DeviceMode.ADB, "device", authorized=True)
-        with tempfile.TemporaryDirectory() as directory:
-            logger = AndroidAuditLogger(Path(directory))
+        device = DeviceState(serial, DeviceMode.ADB, "device", authorized=True)
+        logger = AndroidAuditLogger(Path.cwd())
+        path = None
+        try:
             result = ServicingOrchestrator(audit=logger).handle(request, device)
-            content = next(Path(directory).glob("*.log")).read_text(encoding="utf-8")
+            path = next(Path.cwd().glob(f"*_{serial}.log"))
+            content = path.read_text(encoding="utf-8")
             entry = json.loads(content)
             self.assertTrue(result.success)
             self.assertNotIn("private-reference", content)
             self.assertEqual(entry["operation"], "read_info")
+        finally:
+            if path is not None:
+                path.unlink(missing_ok=True)
 
     def test_samsung_download_mode_requires_known_usb_id(self):
         output = json.dumps({

@@ -18,6 +18,8 @@ class AndroidWorkspace(QWidget):
         self.refresh_worker = None
         self.operation_thread = None
         self.operation_worker = None
+        self.verification_thread = None
+        self.verification_worker = None
         self.build_ui()
         QTimer.singleShot(0, self.refresh_devices)
 
@@ -71,6 +73,9 @@ class AndroidWorkspace(QWidget):
         self.info_button = QPushButton("View Device Record")
         self.info_button.setObjectName("secondaryButton")
         self.info_button.clicked.connect(self.show_device_record)
+        self.verify_button = QPushButton("Verify Hardware")
+        self.verify_button.setObjectName("primaryButton")
+        self.verify_button.clicked.connect(self.verify_hardware)
         self.recovery_button = QPushButton("Reboot to Recovery")
         self.recovery_button.setObjectName("secondaryButton")
         self.recovery_button.clicked.connect(
@@ -83,10 +88,11 @@ class AndroidWorkspace(QWidget):
         )
         action_row = QHBoxLayout()
         action_row.addWidget(self.info_button)
+        action_row.addWidget(self.verify_button)
         action_row.addStretch()
         action_row.addWidget(self.recovery_button)
         action_row.addWidget(self.bootloader_button)
-        for button in (self.info_button, self.recovery_button, self.bootloader_button):
+        for button in (self.info_button, self.verify_button, self.recovery_button, self.bootloader_button):
             button.setEnabled(False)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 18, 22, 22)
@@ -168,8 +174,9 @@ class AndroidWorkspace(QWidget):
             identified_case
             and self.ownership_confirmed.isChecked()
         )
-        idle = self.operation_thread is None
+        idle = self.operation_thread is None and self.verification_thread is None
         self.info_button.setEnabled(selected and identified_case and idle)
+        self.verify_button.setEnabled(selected and idle)
         self.recovery_button.setEnabled(selected and authorized_case and idle)
         self.bootloader_button.setEnabled(selected and authorized_case and idle)
 
@@ -186,6 +193,52 @@ class AndroidWorkspace(QWidget):
             return
         details = "\n".join(f"{key.replace('_', ' ').title()}: {value}" for key, value in result.data.items())
         QMessageBox.information(self, "Device Record", details)
+
+    def verify_hardware(self):
+        serial = self.selected_serial()
+        mode = self.selected_mode()
+        if serial is None or mode is None or self.verification_thread is not None:
+            return
+        self.verification_thread = QThread(self)
+        self.verification_worker = CallableWorker(
+            lambda: self.service.verify_hardware(serial, mode)
+        )
+        self.verification_worker.moveToThread(self.verification_thread)
+        self.verification_thread.started.connect(self.verification_worker.run)
+        self.verification_worker.succeeded.connect(self._verification_completed)
+        self.verification_worker.failed.connect(self._verification_failed)
+        self.verification_worker.finished.connect(self.verification_thread.quit)
+        self.verification_worker.finished.connect(self.verification_worker.deleteLater)
+        self.verification_thread.finished.connect(self._verification_finished)
+        self.verification_thread.finished.connect(self.verification_thread.deleteLater)
+        self._selection_changed()
+        self.verification_thread.start()
+
+    def _verification_completed(self, result):
+        checks = result.data.get("checks", {})
+        lines = []
+        for key, value in result.data.items():
+            if key != "checks":
+                lines.append(f"{key.replace('_', ' ').title()}: {value}")
+        if checks:
+            lines.append("\nVerification checks:")
+            lines.extend(
+                f"{key.replace('_', ' ').title()}: {'Pass' if value else 'Review'}"
+                for key, value in checks.items()
+            )
+        dialog = QMessageBox.information if result.success else QMessageBox.warning
+        dialog(self, "Hardware Verification", f"{result.message}\n\n" + "\n".join(lines))
+
+    def _verification_failed(self, error_message):
+        QMessageBox.critical(
+            self, "Hardware Verification Error",
+            f"ARC3 could not verify the selected device.\n\n{error_message}",
+        )
+
+    def _verification_finished(self):
+        self.verification_worker = None
+        self.verification_thread = None
+        self._selection_changed()
 
     def request_reboot(self, operation):
         serial = self.selected_serial()
