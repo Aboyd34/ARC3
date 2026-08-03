@@ -13,6 +13,9 @@ class DeviceMode(str, Enum):
 
 class OperationType(str, Enum):
     READ_INFO = "read_info"
+    VERIFY_HARDWARE = "verify_hardware"
+    RUN_DIAGNOSTICS = "run_diagnostics"
+    CAPTURE_LOGCAT = "capture_logcat"
     REBOOT_RECOVERY = "reboot_recovery"
     REBOOT_BOOTLOADER = "reboot_bootloader"
 

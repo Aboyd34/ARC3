@@ -1,8 +1,8 @@
 from PySide6.QtCore import QThread, QTimer
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QFormLayout, QFrame, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QFileDialog, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from app.services.android_device_service import AndroidDeviceService
@@ -52,6 +52,9 @@ class AndroidWorkspace(QWidget):
         self.summary = QLabel("No refresh completed yet.")
         self.summary.setObjectName("systemValue")
         self.summary.setWordWrap(True)
+        self.guidance = QLabel("Select a device for connection guidance.")
+        self.guidance.setObjectName("updatedLabel")
+        self.guidance.setWordWrap(True)
 
         case_frame = QFrame()
         case_frame.setObjectName("processActionBar")
@@ -76,6 +79,16 @@ class AndroidWorkspace(QWidget):
         self.verify_button = QPushButton("Verify Hardware")
         self.verify_button.setObjectName("primaryButton")
         self.verify_button.clicked.connect(self.verify_hardware)
+        self.diagnostics_button = QPushButton("Run ADB Diagnostics")
+        self.diagnostics_button.setObjectName("primaryButton")
+        self.diagnostics_button.clicked.connect(self.run_diagnostics)
+        self.log_lines = QSpinBox()
+        self.log_lines.setRange(50, 5000)
+        self.log_lines.setValue(1000)
+        self.log_lines.setSuffix(" lines")
+        self.logcat_button = QPushButton("Export Logcat")
+        self.logcat_button.setObjectName("secondaryButton")
+        self.logcat_button.clicked.connect(self.export_logcat)
         self.recovery_button = QPushButton("Reboot to Recovery")
         self.recovery_button.setObjectName("secondaryButton")
         self.recovery_button.clicked.connect(
@@ -89,10 +102,16 @@ class AndroidWorkspace(QWidget):
         action_row = QHBoxLayout()
         action_row.addWidget(self.info_button)
         action_row.addWidget(self.verify_button)
+        action_row.addWidget(self.diagnostics_button)
+        action_row.addWidget(self.log_lines)
+        action_row.addWidget(self.logcat_button)
         action_row.addStretch()
         action_row.addWidget(self.recovery_button)
         action_row.addWidget(self.bootloader_button)
-        for button in (self.info_button, self.verify_button, self.recovery_button, self.bootloader_button):
+        for button in (
+            self.info_button, self.verify_button, self.diagnostics_button,
+            self.logcat_button, self.recovery_button, self.bootloader_button,
+        ):
             button.setEnabled(False)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 18, 22, 22)
@@ -100,6 +119,7 @@ class AndroidWorkspace(QWidget):
         for widget in (title, subtitle, self.tool_status, self.refresh_button, self.table, case_frame):
             layout.addWidget(widget)
         layout.addLayout(action_row)
+        layout.addWidget(self.guidance)
         layout.addWidget(self.summary)
         layout.setStretchFactor(self.table, 1)
 
@@ -120,12 +140,14 @@ class AndroidWorkspace(QWidget):
         self.refresh_thread.finished.connect(self.refresh_thread.deleteLater)
         self.refresh_thread.start()
 
+    def refresh(self):
+        """F5 dispatcher entry point; starts at most one device refresh."""
+        self.refresh_devices()
+
     def _devices_loaded(self, result):
         tools = result["tools"]
-        self.tool_status.setText(
-            f"ADB: {'available' if tools['adb'] else 'not found'}  |  "
-            f"Fastboot: {'available' if tools['fastboot'] else 'not found'}"
-        )
+        self.tool_status.setText(self.service.tool_status_message(tools))
+        self.tool_status.setWordWrap(True)
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         for device in result["devices"]:
@@ -176,7 +198,20 @@ class AndroidWorkspace(QWidget):
         )
         idle = self.operation_thread is None and self.verification_thread is None
         self.info_button.setEnabled(selected and identified_case and idle)
-        self.verify_button.setEnabled(selected and idle)
+        mode = self.selected_mode()
+        state = None
+        rows = self.table.selectionModel().selectedRows()
+        if rows:
+            item = self.table.item(rows[0].row(), 2)
+            state = item.text() if item else ""
+        self.guidance.setText(
+            self.service.guidance(mode, state or "") if selected else
+            "Select a device for connection guidance."
+        )
+        authorized_adb = mode == "ADB" and (state or "").casefold() == "device"
+        self.verify_button.setEnabled(selected and identified_case and idle)
+        self.diagnostics_button.setEnabled(authorized_adb and identified_case and idle)
+        self.logcat_button.setEnabled(authorized_adb and identified_case and idle)
         self.recovery_button.setEnabled(selected and authorized_case and idle)
         self.bootloader_button.setEnabled(selected and authorized_case and idle)
 
@@ -201,7 +236,10 @@ class AndroidWorkspace(QWidget):
             return
         self.verification_thread = QThread(self)
         self.verification_worker = CallableWorker(
-            lambda: self.service.verify_hardware(serial, mode)
+            lambda: self.service.verify_hardware(
+                serial, mode, self.case_id.text().strip(),
+                self.technician_id.text().strip(),
+            )
         )
         self.verification_worker.moveToThread(self.verification_thread)
         self.verification_thread.started.connect(self.verification_worker.run)
@@ -240,6 +278,76 @@ class AndroidWorkspace(QWidget):
         self.verification_thread = None
         self._selection_changed()
 
+    def run_diagnostics(self):
+        if self.operation_thread is not None:
+            return
+        serial, mode = self.selected_serial(), self.selected_mode()
+        self._start_operation(
+            lambda: self.service.collect_diagnostics(
+                serial, mode, self.case_id.text().strip(),
+                self.technician_id.text().strip(),
+            ),
+            self._diagnostics_completed,
+        )
+
+    def _diagnostics_completed(self, result):
+        if not result.success:
+            QMessageBox.warning(self, "ADB Diagnostics", result.message)
+            return
+        sections = []
+        for heading, values in result.data.items():
+            lines = [f"{key}: {value}" for key, value in values.items()]
+            sections.append(f"{heading.upper()}\n" + "\n".join(lines))
+        QMessageBox.information(
+            self, "ADB Diagnostics", result.message + "\n\n" + "\n\n".join(sections),
+        )
+
+    def export_logcat(self):
+        serial, mode = self.selected_serial(), self.selected_mode()
+        if not serial or self.operation_thread is not None:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export bounded logcat capture", f"ARC3_logcat_{serial}.txt",
+            "Text files (*.txt);;All files (*)",
+        )
+        if not path:
+            return
+        answer = QMessageBox.warning(
+            self, "Export Logcat",
+            "Logcat can contain private application, account, and device data. "
+            "Export it only to an approved case location.\n\nContinue with this bounded capture?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        line_count = self.log_lines.value()
+        self._start_operation(
+            lambda: self.service.capture_logcat(
+                serial, mode, self.case_id.text().strip(),
+                self.technician_id.text().strip(), line_count, path,
+            ),
+            self._logcat_completed,
+        )
+
+    def _logcat_completed(self, result):
+        dialog = QMessageBox.information if result.success else QMessageBox.warning
+        detail = f"\n\nSaved to: {result.data.get('export_path')}" if result.success else ""
+        dialog(self, "Logcat Export", result.message + detail)
+
+    def _start_operation(self, function, completed):
+        self.operation_thread = QThread(self)
+        self.operation_worker = CallableWorker(function)
+        self.operation_worker.moveToThread(self.operation_thread)
+        self.operation_thread.started.connect(self.operation_worker.run)
+        self.operation_worker.succeeded.connect(completed)
+        self.operation_worker.failed.connect(self._operation_failed)
+        self.operation_worker.finished.connect(self.operation_thread.quit)
+        self.operation_worker.finished.connect(self.operation_worker.deleteLater)
+        self.operation_thread.finished.connect(self._operation_finished)
+        self.operation_thread.finished.connect(self.operation_thread.deleteLater)
+        self._selection_changed()
+        self.operation_thread.start()
+
     def request_reboot(self, operation):
         serial = self.selected_serial()
         target = "Recovery" if operation is OperationType.REBOOT_RECOVERY else "Bootloader"
@@ -251,18 +359,9 @@ class AndroidWorkspace(QWidget):
         if answer != QMessageBox.Yes:
             return
         arguments = self.operation_arguments(operation)
-        self.operation_thread = QThread(self)
-        self.operation_worker = CallableWorker(lambda: self.service.run_operation(*arguments))
-        self.operation_worker.moveToThread(self.operation_thread)
-        self.operation_thread.started.connect(self.operation_worker.run)
-        self.operation_worker.succeeded.connect(self._operation_completed)
-        self.operation_worker.failed.connect(self._operation_failed)
-        self.operation_worker.finished.connect(self.operation_thread.quit)
-        self.operation_worker.finished.connect(self.operation_worker.deleteLater)
-        self.operation_thread.finished.connect(self._operation_finished)
-        self.operation_thread.finished.connect(self.operation_thread.deleteLater)
-        self._selection_changed()
-        self.operation_thread.start()
+        self._start_operation(
+            lambda: self.service.run_operation(*arguments), self._operation_completed,
+        )
 
     def _operation_completed(self, result):
         if result.success:

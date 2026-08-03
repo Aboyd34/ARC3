@@ -14,7 +14,25 @@ class ValidationAgent:
             return OperationResult(False, "Case and technician IDs are required.", error_code="case_required")
         if request.target_serial != device.serial:
             return OperationResult(False, "The selected device serial does not match the request.", error_code="serial_mismatch")
-        if request.operation is OperationType.READ_INFO:
+        if request.operation in {
+            OperationType.READ_INFO,
+            OperationType.VERIFY_HARDWARE,
+            OperationType.RUN_DIAGNOSTICS,
+            OperationType.CAPTURE_LOGCAT,
+        }:
+            if device.mode is DeviceMode.ADB and not device.authorized:
+                return OperationResult(
+                    False,
+                    "Unlock the device and accept its USB debugging authorization prompt, then refresh.",
+                    error_code="adb_unauthorized",
+                )
+            if request.operation in {
+                OperationType.RUN_DIAGNOSTICS, OperationType.CAPTURE_LOGCAT,
+            } and device.mode is not DeviceMode.ADB:
+                return OperationResult(
+                    False, "This diagnostic requires an authorized ADB connection.",
+                    error_code="adb_required",
+                )
             return OperationResult(True, "Read-only operation validated.")
         if not request.ownership_confirmed:
             return OperationResult(False, "Ownership confirmation is required.", error_code="ownership_required")
