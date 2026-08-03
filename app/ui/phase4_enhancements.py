@@ -206,6 +206,7 @@ def refresh_visible_page(main_window):
             candidates.insert(0, current_tab)
 
     refresh_methods = (
+        "refresh_devices",
         "refresh",
         "refresh_data",
         "refresh_processes",

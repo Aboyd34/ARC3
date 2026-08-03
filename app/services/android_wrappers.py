@@ -1,11 +1,25 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
+import re
 import shutil
 import subprocess
 from collections.abc import Sequence
+from pathlib import Path
 
 from app.services.device_models import DeviceMode, DeviceState
+
+
+def find_platform_tool(name: str) -> str | None:
+    """Resolve a tool from ARC3's process-local directory before PATH."""
+    configured = os.environ.get("ARC3_ANDROID_PLATFORM_TOOLS", "").strip()
+    if configured:
+        candidate = Path(configured) / f"{name}.exe"
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which(name)
 
 
 class CommandRunner:
@@ -59,9 +73,13 @@ class CommandRunner:
 
 
 class AdbWrapper:
+    LOGCAT_MIN_LINES = 50
+    LOGCAT_MAX_LINES = 5000
+    LOGCAT_MAX_CHARACTERS = 2_000_000
+
     def __init__(self, runner: CommandRunner | None = None) -> None:
         self.runner = runner or CommandRunner()
-        self.executable = shutil.which("adb")
+        self.executable = find_platform_tool("adb")
 
     def list_devices(self) -> list[DeviceState]:
         if not self.executable:
@@ -80,6 +98,45 @@ class AdbWrapper:
             raise RuntimeError("ADB was not found in PATH.")
         output = self.runner.run([self.executable, "-s", serial, "shell", "getprop"])
         return self.parse_properties(output)
+
+    def read_battery(self, serial: str) -> dict[str, str]:
+        return self.parse_colon_values(self._shell(serial, ["dumpsys", "battery"]))
+
+    def read_storage(self, serial: str) -> dict[str, str]:
+        output = self._shell(serial, ["df", "-k", "/data"])
+        lines = [line.split() for line in output.splitlines() if line.strip()]
+        if len(lines) < 2 or len(lines[-1]) < 5:
+            return {"raw": output.strip() or "Unavailable"}
+        row = lines[-1]
+        return {
+            "filesystem": row[0], "total_kb": row[1], "used_kb": row[2],
+            "available_kb": row[3], "used_percent": row[4],
+        }
+
+    def capture_logcat(self, serial: str, max_lines: int = 1000) -> str:
+        bounded_lines = max(self.LOGCAT_MIN_LINES, min(int(max_lines), self.LOGCAT_MAX_LINES))
+        output = self._command([
+            "-s", serial, "logcat", "-d", "-t", str(bounded_lines), "-v", "threadtime",
+        ])
+        return output[:self.LOGCAT_MAX_CHARACTERS]
+
+    def _shell(self, serial: str, arguments: list[str]) -> str:
+        return self._command(["-s", serial, "shell", *arguments])
+
+    def _command(self, arguments: list[str]) -> str:
+        if not self.executable:
+            raise RuntimeError("ADB was not found in PATH.")
+        return self.runner.run([self.executable, *arguments])
+
+    @staticmethod
+    def parse_colon_values(output: str) -> dict[str, str]:
+        values = {}
+        for raw_line in output.splitlines():
+            if ":" not in raw_line:
+                continue
+            key, value = raw_line.strip().split(":", 1)
+            values[key.strip().replace(" ", "_")] = value.strip()
+        return values
 
     @staticmethod
     def parse_properties(output: str) -> dict[str, str]:
@@ -131,7 +188,7 @@ class AdbWrapper:
 class FastbootWrapper:
     def __init__(self, runner: CommandRunner | None = None) -> None:
         self.runner = runner or CommandRunner()
-        self.executable = shutil.which("fastboot")
+        self.executable = find_platform_tool("fastboot")
 
     def list_devices(self) -> list[DeviceState]:
         if not self.executable:
@@ -196,8 +253,11 @@ class SamsungDownloadWrapper:
             raise RuntimeError("Windows PowerShell was not found.")
         script = (
             "Get-PnpDevice -PresentOnly | "
-            "Where-Object {$_.InstanceId -like 'USB*VID_04E8*'} | "
-            "Select-Object InstanceId,FriendlyName,Status | ConvertTo-Json -Compress"
+            "Where-Object {$_.InstanceId -like 'USB*VID_04E8*'} | ForEach-Object { "
+            "$parent=(Get-PnpDeviceProperty -InstanceId $_.InstanceId "
+            "-KeyName 'DEVPKEY_Device_Parent' -ErrorAction SilentlyContinue).Data; "
+            "[PSCustomObject]@{InstanceId=$_.InstanceId;FriendlyName=$_.FriendlyName;"
+            "Status=$_.Status;ParentInstanceId=$parent} } | ConvertTo-Json -Compress"
         )
         return self.parse_devices(self.runner.run([
             self.executable, "-NoProfile", "-NonInteractive", "-Command", script,
@@ -209,16 +269,49 @@ class SamsungDownloadWrapper:
             return []
         payload = json.loads(output)
         records = payload if isinstance(payload, list) else [payload]
-        devices = []
+        grouped = {}
         for record in records:
             instance_id = str(record.get("InstanceId") or "")
             if not any(identifier in instance_id.upper() for identifier in cls.DOWNLOAD_USB_IDS):
                 continue
-            serial = instance_id.rsplit("\\", 1)[-1] or instance_id
+            physical_key = cls._physical_key(record)
+            current = grouped.get(physical_key)
+            if current is None or cls._interface_rank(record) < cls._interface_rank(current):
+                grouped[physical_key] = record
+        devices = []
+        for physical_key in sorted(grouped):
+            record = grouped[physical_key]
+            digest = hashlib.sha256(physical_key.encode("utf-8")).hexdigest()[:16].upper()
             devices.append(DeviceState(
-                serial=serial, mode=DeviceMode.DOWNLOAD,
+                serial=f"SAMSUNG-DL-{digest}", mode=DeviceMode.DOWNLOAD,
                 state=str(record.get("Status") or "Unknown"),
                 model=str(record.get("FriendlyName") or "Samsung Download Mode"),
                 oem="Samsung", authorized=True,
             ))
         return devices
+
+    @staticmethod
+    def _physical_key(record: dict) -> str:
+        parent = str(record.get("ParentInstanceId") or "").strip()
+        if parent:
+            return parent.upper()
+        instance_id = str(record.get("InstanceId") or "").strip().upper()
+        parts = instance_id.split("\\", 1)
+        hardware_id = re.sub(r"&MI_[0-9A-F]{2}", "", parts[0])
+        if len(parts) == 1:
+            return hardware_id
+        interface_suffix = re.sub(r"&[0-9]{4}$", "", parts[1])
+        return f"{hardware_id}\\{interface_suffix}"
+
+    @staticmethod
+    def _interface_rank(record: dict) -> tuple[int, str]:
+        name = str(record.get("FriendlyName") or "").casefold()
+        if "composite" in name:
+            rank = 0
+        elif "download" in name:
+            rank = 1
+        elif "modem" in name:
+            rank = 9
+        else:
+            rank = 5
+        return rank, name
