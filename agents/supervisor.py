@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from agents.configuration import AgentConfiguration
+from agents.codex_execution import CodexExecutionAgent
 from agents.git_guard import GitGuard
 from agents.models import (
     GitStatus,
@@ -60,6 +61,10 @@ class Supervisor:
             configuration,
             self.git,
         )
+        self.codex_execution_agent = CodexExecutionAgent(
+            self.project_path,
+            max(configuration.command_timeout_seconds, 1800),
+        )
 
     def status(self) -> GitStatus:
         return self.git.inspect()
@@ -83,6 +88,12 @@ class Supervisor:
 
     def validate(self) -> ValidationResult:
         return self.validator.run_all()
+
+    def execute_codex(self, task_title: str, user_approved: bool):
+        status = self.status()
+        self._require_safe_repository(status, "execute Codex")
+        prompt = self.prompt_builder.build(task_title, status.branch)
+        return self.codex_execution_agent.run(prompt, user_approved)
 
     def review(self) -> ReviewResult:
         status = self.status()
