@@ -86,6 +86,19 @@ class DeviceArchitectureTests(unittest.TestCase):
         adb.reboot.assert_called_once_with("ABC", "recovery")
         audit.record.assert_called_once()
 
+    def test_orchestrator_does_not_route_diagnostics_as_a_reboot(self):
+        request = ProfessionalOperationRequest(
+            "CASE-1", "TECH-1", OperationType.RUN_DIAGNOSTICS, "ABC",
+        )
+        device = DeviceState("ABC", DeviceMode.ADB, "device", authorized=True)
+        adb = Mock()
+        audit = Mock()
+        result = ServicingOrchestrator(adb=adb, audit=audit).handle(request, device)
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "unsupported_operation")
+        adb.reboot.assert_not_called()
+        audit.record.assert_called_once()
+
     def test_audit_redacts_sensitive_keys(self):
         serial = f"TEST-{uuid4().hex}"
         request = ProfessionalOperationRequest(

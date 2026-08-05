@@ -102,6 +102,7 @@ class DeviceDiagnosticsTests(unittest.TestCase):
         device = DeviceState("ABC", DeviceMode.ADB, "device", authorized=True)
         with self.assertRaisesRegex(ValueError, "file path"):
             AndroidDiagnosticsService(adb).capture_logcat(device, 100, Path.cwd())
+        adb.capture_logcat.assert_not_called()
 
     @patch("app.pages.android_workspace.QFileDialog.getSaveFileName")
     @patch("app.pages.android_workspace.QMessageBox.warning")
@@ -197,6 +198,16 @@ class DeviceDiagnosticsTests(unittest.TestCase):
         self.assertEqual(calls, ["refresh"])
         workspace.close()
         window.close()
+
+    def test_workspace_refuses_a_second_concurrent_operation(self):
+        with patch("app.pages.android_workspace.QTimer.singleShot"):
+            workspace = AndroidWorkspace()
+        existing_thread = object()
+        workspace.operation_thread = existing_thread
+        workspace._start_operation(Mock(), Mock())
+        self.assertIs(workspace.operation_thread, existing_thread)
+        workspace.operation_thread = None
+        workspace.close()
 
 
 if __name__ == "__main__":

@@ -30,6 +30,15 @@ class ServicingOrchestrator:
     def _route(self, request: ProfessionalOperationRequest, device: DeviceState) -> OperationResult:
         if request.operation is OperationType.READ_INFO:
             return OperationResult(True, "Device information collected.", data=device.to_dict())
+        if request.operation not in {
+            OperationType.REBOOT_RECOVERY,
+            OperationType.REBOOT_BOOTLOADER,
+        }:
+            return OperationResult(
+                False,
+                "This operation is not handled by the reboot orchestrator.",
+                error_code="unsupported_operation",
+            )
         target = "recovery" if request.operation is OperationType.REBOOT_RECOVERY else "bootloader"
         if device.mode is DeviceMode.ADB:
             self.adb.reboot(device.serial, target)

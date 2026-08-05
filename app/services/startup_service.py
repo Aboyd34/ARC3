@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ctypes
 import json
 import os
 import re
@@ -608,7 +609,16 @@ class StartupService:
                     winreg.REG_SZ,
                     registry_path,
                 )
-            subprocess.Popen(["regedit.exe"])
+            # Registry Editor is an elevated Windows application on some
+            # systems. ShellExecute lets Windows display the normal UAC prompt
+            # instead of surfacing WinError 740 to ARC3.
+            launch_result = ctypes.windll.shell32.ShellExecuteW(
+                None, "open", "regedit.exe", "/m", None, 1,
+            )
+            if launch_result <= 32:
+                raise OSError(
+                    f"Windows could not open Registry Editor (code {launch_result})."
+                )
         except OSError as error:
             return False, str(error)
         return True, ""

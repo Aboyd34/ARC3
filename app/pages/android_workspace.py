@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.services.android_device_service import AndroidDeviceService
+from app.services.android_wrappers import AdbWrapper
 from app.services.device_models import OperationType
 from app.workers.callable_worker import CallableWorker
 
@@ -83,9 +84,10 @@ class AndroidWorkspace(QWidget):
         self.diagnostics_button.setObjectName("primaryButton")
         self.diagnostics_button.clicked.connect(self.run_diagnostics)
         self.log_lines = QSpinBox()
-        self.log_lines.setRange(50, 5000)
+        self.log_lines.setRange(AdbWrapper.LOGCAT_MIN_LINES, AdbWrapper.LOGCAT_MAX_LINES)
         self.log_lines.setValue(1000)
         self.log_lines.setSuffix(" lines")
+        self.log_lines.setAccessibleName("Maximum logcat lines")
         self.logcat_button = QPushButton("Export Logcat")
         self.logcat_button.setObjectName("secondaryButton")
         self.logcat_button.clicked.connect(self.export_logcat)
@@ -335,6 +337,8 @@ class AndroidWorkspace(QWidget):
         dialog(self, "Logcat Export", result.message + detail)
 
     def _start_operation(self, function, completed):
+        if self.operation_thread is not None:
+            return
         self.operation_thread = QThread(self)
         self.operation_worker = CallableWorker(function)
         self.operation_worker.moveToThread(self.operation_thread)

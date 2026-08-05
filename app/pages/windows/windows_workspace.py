@@ -6,6 +6,7 @@
 )
 
 from app.pages.windows.processes_tab import ProcessesTab
+from app.pages.windows.devices_tab import DevicesTab
 from app.pages.windows.startup_tab import StartupTab
 from app.pages.windows_page import WindowsPage
 
@@ -34,6 +35,7 @@ class WindowsWorkspace(QWidget):
         self.overview_tab = WindowsPage()
         self.processes_tab = ProcessesTab()
         self.startup_tab = StartupTab()
+        self.devices_tab = DevicesTab()
 
         self.tabs.addTab(
             self.overview_tab,
@@ -55,6 +57,11 @@ class WindowsWorkspace(QWidget):
         self.tabs.addTab(
             self.startup_tab,
             "Startup",
+        )
+
+        self.tabs.addTab(
+            self.devices_tab,
+            "Devices",
         )
 
         self.tabs.addTab(
