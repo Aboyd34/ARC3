@@ -39,11 +39,11 @@ class AndroidDiagnosticsService:
     def capture_logcat(
         self, device: DeviceState, max_lines: int, export_path: Path,
     ) -> OperationResult:
-        output = self.adb.capture_logcat(device.serial, max_lines)
         destination = export_path.expanduser().resolve()
         if destination.exists() and destination.is_dir():
             raise ValueError("Choose a file path for the logcat export, not a directory.")
         destination.parent.mkdir(parents=True, exist_ok=True)
+        output = self.adb.capture_logcat(device.serial, max_lines)
         safe_serial = re.sub(r"[\r\n\t]", "_", device.serial)
         header = (
             f"ARC3 bounded logcat capture\n"
