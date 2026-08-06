@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from typing import Any
 import xml.etree.ElementTree as ET
 
+from app.adapters.windows.device_commands import WindowsDeviceCommandAdapter
+from app.core.results import OperationResult
+from app.domain.windows_devices import is_disabled, normalize_device, problem_number
+from app.safety.device_operations import DeviceOperationPolicy
+
 
 class WindowsDeviceService:
     """Enumerate and reversibly control Windows Plug and Play devices."""
+
+    _MASKED_DRIVER_INF = re.compile(r"oem\d+\.---", re.IGNORECASE)
 
     ENUMERATION_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
@@ -39,6 +47,8 @@ $device = Get-PnpDevice -InstanceId $InstanceId -ErrorAction Stop
 $properties = @{}
 Get-PnpDeviceProperty -InstanceId $InstanceId -ErrorAction SilentlyContinue |
     ForEach-Object { $properties[$_.KeyName] = $_.Data }
+$signedDriver = Get-CimInstance Win32_PnPSignedDriver -Filter "DeviceID='$($InstanceId.Replace("'", "''"))'" -ErrorAction SilentlyContinue |
+    Select-Object -First 1
 [PSCustomObject]@{
     name = if ($device.FriendlyName) { $device.FriendlyName } else { $device.InstanceId }
     class = $device.Class
@@ -55,6 +65,8 @@ Get-PnpDeviceProperty -InstanceId $InstanceId -ErrorAction SilentlyContinue |
     driver_version = $properties['DEVPKEY_Device_DriverVersion']
     driver_date = $properties['DEVPKEY_Device_DriverDate']
     driver_inf_path = $properties['DEVPKEY_Device_DriverInfPath']
+    driver_is_signed = $signedDriver.IsSigned
+    driver_signer = $signedDriver.Signer
     service = $properties['DEVPKEY_Device_Service']
     enumerator = $properties['DEVPKEY_Device_EnumeratorName']
     location = $properties['DEVPKEY_Device_LocationInfo']
@@ -64,17 +76,12 @@ Get-PnpDeviceProperty -InstanceId $InstanceId -ErrorAction SilentlyContinue |
 """
 
     def __init__(self, runner=None) -> None:
-        self.runner = runner or subprocess.run
+        self.commands = WindowsDeviceCommandAdapter(runner)
+        self.runner = self.commands.runner
 
     def collect_devices(self) -> list[dict[str, Any]]:
         try:
-            completed = self.runner(
-                [
-                    "powershell.exe", "-NoProfile", "-NonInteractive",
-                    "-ExecutionPolicy", "Bypass", "-Command", self.ENUMERATION_SCRIPT,
-                ],
-                capture_output=True, text=True, timeout=45, check=False,
-            )
+            completed = self.commands.powershell(self.ENUMERATION_SCRIPT, timeout=45)
         except (FileNotFoundError, PermissionError, subprocess.TimeoutExpired, OSError):
             return self._collect_devices_with_pnputil()
         if completed.returncode:
@@ -101,13 +108,8 @@ Get-PnpDeviceProperty -InstanceId $InstanceId -ErrorAction SilentlyContinue |
         if not self._valid_instance_id(instance_id):
             raise ValueError("The selected device identifier is invalid.")
         try:
-            completed = self.runner(
-                [
-                    "powershell.exe", "-NoProfile", "-NonInteractive",
-                    "-ExecutionPolicy", "Bypass", "-Command",
-                    self.DETAILS_SCRIPT, instance_id,
-                ],
-                capture_output=True, text=True, timeout=30, check=False,
+            completed = self.commands.powershell(
+                self.DETAILS_SCRIPT, instance_id, timeout=30,
             )
         except (FileNotFoundError, PermissionError, subprocess.TimeoutExpired, OSError):
             return self._collect_details_with_pnputil(instance_id)
@@ -139,6 +141,15 @@ Get-PnpDeviceProperty -InstanceId $InstanceId -ErrorAction SilentlyContinue |
             raise RuntimeError("Windows did not return the selected device details.")
         record = self._pnputil_record(element)
         properties = self._pnputil_properties(element)
+        installed_driver = self._installed_driver(element)
+        driver_inf = element.findtext("DriverName", "")
+        if self._is_masked_driver_inf(driver_inf):
+            try:
+                driver_inf = self._resolve_published_driver(installed_driver) or driver_inf
+            except RuntimeError:
+                # Details remain useful and the masked value stays non-exportable.
+                pass
+        driver_signer = self._driver_signer(installed_driver)
         details = {
             **record,
             "present": str(properties.get("DEVPKEY_Device_IsPresent", "")).casefold() == "true",
@@ -146,7 +157,9 @@ Get-PnpDeviceProperty -InstanceId $InstanceId -ErrorAction SilentlyContinue |
             "hardware_ids": properties.get("DEVPKEY_Device_HardwareIds", []),
             "compatible_ids": properties.get("DEVPKEY_Device_CompatibleIds", []),
             "class_guid": element.findtext("ClassGuid", ""),
-            "driver_inf_path": element.findtext("DriverName", ""),
+            "driver_inf_path": driver_inf,
+            "driver_is_signed": self._signed_driver_value(element, driver_signer),
+            "driver_signer": driver_signer,
             "service": properties.get("DEVPKEY_Device_Service", ""),
             "enumerator": properties.get("DEVPKEY_Device_EnumeratorName", ""),
             "location": properties.get("DEVPKEY_Device_LocationInfo", ""),
@@ -155,11 +168,65 @@ Get-PnpDeviceProperty -InstanceId $InstanceId -ErrorAction SilentlyContinue |
         }
         return {key: self._display_value(value) for key, value in details.items()}
 
+    @staticmethod
+    def _signed_driver_value(element: ET.Element, signer: str = "") -> bool | str:
+        value = element.findtext("IsSigned", "")
+        if not value:
+            value = str(WindowsDeviceService._pnputil_properties(element).get(
+                "DEVPKEY_Device_DriverIsSigned", "",
+            ))
+        if not value:
+            return True if signer.strip() else "Not reported"
+        return value.casefold() == "true"
+
+    @staticmethod
+    def _driver_signer(installed_driver: ET.Element | None) -> str:
+        return (
+            installed_driver.findtext("SignerName", "")
+            if installed_driver is not None else ""
+        )
+
+    @staticmethod
+    def _installed_driver(element: ET.Element) -> ET.Element | None:
+        drivers = element.findall("./MatchingDrivers/DriverName")
+        return next(
+            (driver for driver in drivers
+             if "installed" in driver.findtext("Status", "").casefold()),
+            drivers[0] if drivers else None,
+        )
+
+    @classmethod
+    def _is_masked_driver_inf(cls, value: str) -> bool:
+        return bool(cls._MASKED_DRIVER_INF.fullmatch((value or "").strip()))
+
+    def _resolve_published_driver(self, installed_driver: ET.Element | None) -> str:
+        if installed_driver is None:
+            return ""
+        identity_fields = ("OriginalName", "ProviderName", "ClassGuid", "DriverVersion")
+        identity = {
+            field: installed_driver.findtext(field, "").strip().casefold()
+            for field in identity_fields
+        }
+        if not identity["OriginalName"]:
+            return ""
+        root = self._pnputil_xml(["/enum-drivers"])
+        matches = []
+        for candidate in root.findall("Driver"):
+            if all(
+                not expected
+                or candidate.findtext(field, "").strip().casefold() == expected
+                for field, expected in identity.items()
+            ):
+                published_name = candidate.get("DriverName", "").strip()
+                if DeviceOperationPolicy.valid_driver_inf(published_name):
+                    matches.append(published_name)
+        unique_matches = list(dict.fromkeys(matches))
+        return unique_matches[0] if len(unique_matches) == 1 else ""
+
     def _pnputil_xml(self, arguments: list[str]) -> ET.Element:
         try:
-            completed = self.runner(
-                ["pnputil.exe", *arguments, "/format", "xml"],
-                capture_output=True, text=True, timeout=60, check=False,
+            completed = self.commands.pnputil(
+                [*arguments, "/format", "xml"], timeout=60,
             )
         except FileNotFoundError as error:
             raise RuntimeError("Windows device inspection is not supported.") from error
@@ -180,12 +247,7 @@ Get-PnpDeviceProperty -InstanceId $InstanceId -ErrorAction SilentlyContinue |
     @classmethod
     def _pnputil_record(cls, element: ET.Element) -> dict[str, Any]:
         properties = cls._pnputil_properties(element)
-        drivers = element.findall("./MatchingDrivers/DriverName")
-        installed_driver = next(
-            (driver for driver in drivers
-             if "installed" in driver.findtext("Status", "").casefold()),
-            drivers[0] if drivers else None,
-        )
+        installed_driver = cls._installed_driver(element)
         provider = properties.get("DEVPKEY_Device_DriverProvider", "Unknown")
         version = properties.get("DEVPKEY_Device_DriverVersion", "Unknown")
         if installed_driver is not None:
@@ -241,89 +303,68 @@ Get-PnpDeviceProperty -InstanceId $InstanceId -ErrorAction SilentlyContinue |
 
     @staticmethod
     def _normalize(record: dict[str, Any]) -> dict[str, Any]:
-        status = str(record.get("status") or "Unknown")
-        problem = record.get("problem_code")
-        disabled_by_problem = WindowsDeviceService._is_disabled(problem, status)
-        enabled = bool(record.get(
-            "enabled",
-            status.casefold() != "disabled" and not disabled_by_problem,
-        ))
-        if disabled_by_problem:
-            enabled = False
-        problem_number = WindowsDeviceService._problem_number(problem)
-        no_problem = problem in (None, "") or problem_number == 0
-        healthy_status = status.casefold() in {"ok", "started", "stopped"}
-        if not enabled:
-            health = "Disabled"
-        elif healthy_status and no_problem:
-            health = "Healthy"
-        else:
-            health = "Needs attention"
-        return {
-            "name": str(record.get("name") or "Unknown device"),
-            "class": str(record.get("class") or "Unknown"),
-            "status": status,
-            "health": health,
-            "problem_code": "" if problem is None else str(problem),
-            "manufacturer": str(record.get("manufacturer") or "Unknown"),
-            "driver_provider": str(record.get("driver_provider") or "Unknown"),
-            "driver_version": str(record.get("driver_version") or "Unknown"),
-            "driver_date": str(record.get("driver_date") or "Unknown"),
-            "instance_id": str(record.get("instance_id") or ""),
-            "enabled": enabled,
-        }
+        return normalize_device(record)
 
     @staticmethod
     def _is_disabled(problem: Any, status: str) -> bool:
-        value = str(problem).strip().casefold()
-        if value == "cm_prob_disabled":
-            return True
-        return (
-            WindowsDeviceService._problem_number(problem) == 22
-            or status.casefold() == "disabled"
-        )
+        return is_disabled(problem, status)
 
     @staticmethod
     def _problem_number(problem: Any) -> int | None:
-        value = str(problem).strip().casefold()
-        try:
-            return int(value, 0)
-        except ValueError:
-            return None
+        return problem_number(problem)
 
-    def set_enabled(self, instance_id: str, enabled: bool) -> tuple[bool, str]:
+    def set_enabled(self, instance_id: str, enabled: bool) -> OperationResult:
         if not self._valid_instance_id(instance_id):
-            return False, "The selected device identifier is invalid."
+            return OperationResult(False, "The selected device identifier is invalid.")
         action = "/enable-device" if enabled else "/disable-device"
         try:
-            completed = self.runner(
-                ["pnputil.exe", action, instance_id],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
+            completed = self.commands.pnputil([action, instance_id], timeout=30)
         except FileNotFoundError:
-            return False, "Device control is not supported on this Windows version."
+            return OperationResult(False, "Device control is not supported on this Windows version.")
         except PermissionError:
-            return False, "Access was denied. Run ARC3 with the required administrator access."
+            return OperationResult(False, "Access was denied. Run ARC3 with the required administrator access.")
         except subprocess.TimeoutExpired:
-            return False, "Windows did not finish the device operation in time."
+            return OperationResult(False, "Windows did not finish the device operation in time.")
         except OSError as error:
-            return False, f"Windows could not change the device state: {error}"
+            return OperationResult(False, f"Windows could not change the device state: {error}")
         output = (completed.stdout or completed.stderr).strip()
         if completed.returncode:
-            return False, output or "Windows rejected the device operation."
+            return OperationResult(False, output or "Windows rejected the device operation.")
         state = "enabled" if enabled else "disabled"
-        return True, output or f"The device was {state}."
+        return OperationResult(True, output or f"The device was {state}.")
+
+    def export_driver(self, driver_inf: str, destination: str) -> OperationResult:
+        if not DeviceOperationPolicy.valid_driver_inf(driver_inf):
+            return OperationResult(False, "Windows did not report a valid driver INF name.")
+        if not destination or "\n" in destination or "\r" in destination:
+            return OperationResult(False, "Select a valid driver export folder.")
+        try:
+            completed = self.commands.pnputil(
+                ["/export-driver", driver_inf, destination], timeout=120,
+            )
+        except FileNotFoundError:
+            return OperationResult(False, "Driver export is not supported on this Windows version.")
+        except PermissionError:
+            return OperationResult(False, "Access was denied while exporting the driver.")
+        except subprocess.TimeoutExpired:
+            return OperationResult(False, "Windows did not finish exporting the driver in time.")
+        except OSError as error:
+            return OperationResult(False, f"Windows could not export the driver: {error}")
+        output = (completed.stdout or completed.stderr).strip()
+        if completed.returncode:
+            return OperationResult(False, output or "Windows rejected the driver export.")
+        return OperationResult(True, output or "The driver package was exported.")
+
+    def open_device_manager(self) -> OperationResult:
+        try:
+            self.commands.open_device_manager()
+        except (FileNotFoundError, PermissionError, OSError) as error:
+            return OperationResult(False, f"Windows Device Manager could not be opened: {error}")
+        return OperationResult(True, "Windows Device Manager was opened.")
 
     @staticmethod
     def _valid_instance_id(instance_id: str) -> bool:
-        return bool(
-            instance_id and instance_id.strip() == instance_id
-            and "\n" not in instance_id and "\r" not in instance_id
-            and len(instance_id) <= 4096
-        )
+        return DeviceOperationPolicy.valid_instance_id(instance_id)
 
     @staticmethod
     def _display_value(value: Any) -> Any:

@@ -7,12 +7,13 @@ from datetime import datetime
 from PySide6.QtCore import QThread, Qt, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QMessageBox, QPushButton, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
+    QGroupBox, QLabel, QLineEdit, QMessageBox, QPushButton, QTableWidget,
+    QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from app.services.windows_device_service import WindowsDeviceService
+from app.safety.device_operations import DeviceOperationPolicy
 from app.workers.callable_worker import CallableWorker
 
 
@@ -33,6 +34,7 @@ class DevicesTab(QWidget):
         self.refresh_worker = None
         self.action_thread = None
         self.action_worker = None
+        self.selected_details = None
         self.build_ui()
         QTimer.singleShot(0, self.refresh)
 
@@ -63,11 +65,15 @@ class DevicesTab(QWidget):
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.setObjectName("primaryButton")
         self.refresh_button.clicked.connect(self.refresh)
+        self.open_manager_button = QPushButton("Open Device Manager")
+        self.open_manager_button.setObjectName("secondaryButton")
+        self.open_manager_button.clicked.connect(self.open_device_manager)
         controls = QHBoxLayout()
         controls.addWidget(self.search_box, 1)
         controls.addWidget(self.health_filter)
         controls.addWidget(self.export_csv_button)
         controls.addWidget(self.export_json_button)
+        controls.addWidget(self.open_manager_button)
         controls.addWidget(self.refresh_button)
         self.table = QTableWidget()
         self.table.setColumnCount(len(self.COLUMNS))
@@ -90,6 +96,14 @@ class DevicesTab(QWidget):
         self.verify_button.setObjectName("secondaryButton")
         self.verify_button.setEnabled(False)
         self.verify_button.clicked.connect(self.verify_selected_hardware)
+        self.copy_ids_button = QPushButton("Copy Hardware IDs")
+        self.copy_ids_button.setObjectName("secondaryButton")
+        self.copy_ids_button.setEnabled(False)
+        self.copy_ids_button.clicked.connect(self.copy_hardware_ids)
+        self.export_driver_button = QPushButton("Export Driver")
+        self.export_driver_button.setObjectName("secondaryButton")
+        self.export_driver_button.setEnabled(False)
+        self.export_driver_button.clicked.connect(self.export_selected_driver)
         self.enable_button = QPushButton("Enable Device")
         self.enable_button.setObjectName("primaryButton")
         self.enable_button.setEnabled(False)
@@ -102,6 +116,8 @@ class DevicesTab(QWidget):
         actions.addWidget(self.selection_label, 1)
         actions.addWidget(self.details_button)
         actions.addWidget(self.verify_button)
+        actions.addWidget(self.copy_ids_button)
+        actions.addWidget(self.export_driver_button)
         actions.addWidget(self.enable_button)
         actions.addWidget(self.disable_button)
         layout = QVBoxLayout(self)
@@ -113,6 +129,15 @@ class DevicesTab(QWidget):
         layout.addLayout(controls)
         layout.addWidget(self.table, 1)
         layout.addLayout(actions)
+        details_group = QGroupBox("Device Details")
+        details_layout = QVBoxLayout(details_group)
+        self.details_panel = QTextEdit()
+        self.details_panel.setReadOnly(True)
+        self.details_panel.setPlaceholderText(
+            "Select a device and choose View Details to inspect identity, driver, and signature information."
+        )
+        details_layout.addWidget(self.details_panel)
+        layout.addWidget(details_group, 1)
 
     def refresh(self):
         if self.refresh_thread is not None:
@@ -132,6 +157,8 @@ class DevicesTab(QWidget):
         self.refresh_thread.start()
 
     def _loaded(self, devices):
+        selected = self.selected_device()
+        selected_instance_id = selected["instance_id"] if selected else None
         self.devices = devices
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
@@ -148,6 +175,11 @@ class DevicesTab(QWidget):
                     }.get(device["health"], "#e5e7eb")))
                 self.table.setItem(row, column, item)
         self.table.setSortingEnabled(True)
+        if selected_instance_id:
+            for row in range(self.table.rowCount()):
+                if self.table.item(row, 0).data(Qt.UserRole) == selected_instance_id:
+                    self.table.selectRow(row)
+                    break
         self.apply_filter()
 
     def _failed(self, message):
@@ -185,9 +217,16 @@ class DevicesTab(QWidget):
 
     def update_actions(self):
         device = self.selected_device()
+        if not device or (
+            self.selected_details
+            and self.selected_details.get("instance_id") != device["instance_id"]
+        ):
+            self.selected_details = None
         idle = self.action_thread is None
         self.details_button.setEnabled(bool(device and idle))
         self.verify_button.setEnabled(bool(device and idle))
+        self.copy_ids_button.setEnabled(bool(device and idle))
+        self.export_driver_button.setEnabled(bool(device and idle))
         self.enable_button.setEnabled(bool(device and not device["enabled"] and idle))
         self.disable_button.setEnabled(bool(device and device["enabled"] and idle))
         self.selection_label.setText(
@@ -201,8 +240,7 @@ class DevicesTab(QWidget):
         verb = "Enable" if enabled else "Disable"
         answer = QMessageBox.question(
             self, f"{verb} Device",
-            f"{verb} {device['name']}?\n\nWindows may require administrator access. "
-            "Disabling essential hardware can interrupt the system.",
+            DeviceOperationPolicy.confirmation_message(device["name"], enabled),
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if answer != QMessageBox.Yes:
@@ -235,7 +273,66 @@ class DevicesTab(QWidget):
             )
 
     def _show_details(self, details):
-        QMessageBox.information(self, "Device Details", self._format_details(details))
+        self.selected_details = details
+        self.details_panel.setPlainText(self._format_details(details))
+        self.update_actions()
+
+    def copy_hardware_ids(self):
+        device = self.selected_device()
+        if not device:
+            return
+        if not self.selected_details:
+            self._start_action(
+                lambda: self.service.collect_details(device["instance_id"]),
+                self._copy_loaded_hardware_ids,
+            )
+            return
+        self._copy_loaded_hardware_ids(self.selected_details)
+
+    def _copy_loaded_hardware_ids(self, details):
+        self._show_details(details)
+        hardware_ids = details.get("hardware_ids") or []
+        if isinstance(hardware_ids, str):
+            hardware_ids = [hardware_ids]
+        if not hardware_ids:
+            QMessageBox.warning(self, "Hardware IDs", "Windows did not report hardware IDs for this device.")
+            return
+        QApplication.clipboard().setText("\n".join(str(value) for value in hardware_ids))
+        QMessageBox.information(self, "Hardware IDs", "Hardware IDs copied to the clipboard.")
+
+    def export_selected_driver(self):
+        device = self.selected_device()
+        if not device:
+            return
+        if not self.selected_details:
+            self._start_action(
+                lambda: self.service.collect_details(device["instance_id"]),
+                self._choose_driver_export,
+            )
+            return
+        self._choose_driver_export(self.selected_details)
+
+    def _choose_driver_export(self, details):
+        self._show_details(details)
+        driver_inf = str(details.get("driver_inf_path") or "")
+        if not DeviceOperationPolicy.valid_driver_inf(driver_inf):
+            QMessageBox.warning(self, "Export Driver", "Windows did not report an exportable driver INF for this device.")
+            return
+        destination = QFileDialog.getExistingDirectory(self, "Select Driver Export Folder")
+        if destination:
+            self._start_action(
+                lambda: self.service.export_driver(driver_inf, destination),
+                self._driver_exported,
+            )
+
+    def _driver_exported(self, result):
+        method = QMessageBox.information if result.success else QMessageBox.warning
+        method(self, "Driver Export" if result.success else "Driver Export Failed", result.message)
+
+    def open_device_manager(self):
+        result = self.service.open_device_manager()
+        if not result.success:
+            QMessageBox.warning(self, "Open Device Manager", result.message)
 
     def _show_verification(self, result):
         checks = "\n".join(

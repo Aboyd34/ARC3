@@ -3,21 +3,12 @@ from typing import Any
 
 import psutil
 
+from app.core.results import OperationResult
+from app.safety.process_operations import ProcessOperationPolicy
+
 
 class ProcessService:
-    PROTECTED_PROCESS_NAMES = {
-        "system",
-        "registry",
-        "memory compression",
-        "secure system",
-        "system idle process",
-        "csrss.exe",
-        "wininit.exe",
-        "winlogon.exe",
-        "services.exe",
-        "lsass.exe",
-        "smss.exe",
-    }
+    PROTECTED_PROCESS_NAMES = ProcessOperationPolicy.PROTECTED_PROCESS_NAMES
 
     def __init__(self):
         self.arc3_pid = os.getpid()
@@ -149,25 +140,18 @@ class ProcessService:
         }
 
     def is_protected(self, pid: int, process_name: str) -> bool:
-        normalized_name = process_name.strip().lower()
+        return ProcessOperationPolicy.is_protected(
+            pid, process_name, self.arc3_pid,
+        )
 
-        if pid == self.arc3_pid:
-            return True
-
-        if pid in (0, 4):
-            return True
-
-        return normalized_name in self.PROTECTED_PROCESS_NAMES
-
-    def terminate_process(self, pid: int) -> tuple[bool, str]:
+    def terminate_process(self, pid: int) -> OperationResult:
         try:
             process = psutil.Process(pid)
             process_name = process.name()
 
             if self.is_protected(pid, process_name):
-                return (
-                    False,
-                    "ARC3 blocked termination of this protected process.",
+                return OperationResult(
+                    False, "ARC3 blocked termination of this protected process.",
                 )
 
             process.terminate()
@@ -175,24 +159,21 @@ class ProcessService:
             try:
                 process.wait(timeout=4)
             except psutil.TimeoutExpired:
-                return (
-                    False,
-                    "The process did not close within four seconds.",
+                return OperationResult(
+                    False, "The process did not close within four seconds.",
                 )
 
-            return (
-                True,
-                f"{process_name} was terminated successfully.",
+            return OperationResult(
+                True, f"{process_name} was terminated successfully.",
             )
 
         except psutil.NoSuchProcess:
-            return False, "The process is no longer running."
+            return OperationResult(False, "The process is no longer running.")
 
         except psutil.AccessDenied:
-            return (
-                False,
-                "Access was denied. ARC3 may need administrator privileges.",
+            return OperationResult(
+                False, "Access was denied. ARC3 may need administrator privileges.",
             )
 
         except Exception as error:
-            return False, str(error)
+            return OperationResult(False, str(error))

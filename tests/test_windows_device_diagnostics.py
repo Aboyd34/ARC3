@@ -5,8 +5,10 @@ from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QThread, QTimer, Qt
 from PySide6.QtWidgets import QApplication, QMessageBox, QStackedWidget, QWidget
 
+from app.main_window import MainWindow
 from app.pages.windows.devices_tab import DevicesTab
 from app.services.windows_device_service import WindowsDeviceService
 from app.ui.phase4_enhancements import refresh_visible_page
@@ -85,6 +87,88 @@ class WindowsDeviceServiceTests(unittest.TestCase):
         self.assertEqual(runner.call_args.args[0][:4], [
             "pnputil.exe", "/enum-devices", "/instanceid", "USB\\CAM",
         ])
+
+    def test_pnputil_fallback_resolves_masked_published_inf(self):
+        device_xml = """<PnpUtil><Device InstanceId="USB\\BOOT">
+            <DeviceDescription>Android Bootloader Interface</DeviceDescription>
+            <ClassName>AndroidUsbDeviceClass</ClassName>
+            <ClassGuid>{android-guid}</ClassGuid><ManufacturerName>Google, Inc.</ManufacturerName>
+            <Status>Disconnected</Status><DriverName>oem36.---</DriverName>
+            <MatchingDrivers><DriverName>
+              <OriginalName>android_general.inf</OriginalName>
+              <ProviderName>Google, Inc.</ProviderName>
+              <ClassGuid>{android-guid}</ClassGuid>
+              <DriverVersion>08/27/2012 7.0.0.4</DriverVersion>
+              <SignerName>Trusted Driver Publisher</SignerName>
+              <Status>BestRanked</Status>
+            </DriverName></MatchingDrivers>
+        </Device></PnpUtil>"""
+        drivers_xml = """<PnpUtil>
+          <Driver DriverName="oem65.inf">
+            <OriginalName>android_general.inf</OriginalName>
+            <ProviderName>Google, Inc.</ProviderName>
+            <ClassGuid>{android-guid}</ClassGuid>
+            <DriverVersion>08/27/2012 7.0.0.4</DriverVersion>
+            <SignerName>Trusted Driver Publisher</SignerName>
+          </Driver>
+          <Driver DriverName="oem37.inf">
+            <OriginalName>android_winusb.inf</OriginalName>
+            <ProviderName>MediaTek</ProviderName>
+            <ClassGuid>{android-guid}</ClassGuid>
+            <DriverVersion>08/28/2014 11.0.0.0</DriverVersion>
+          </Driver>
+        </PnpUtil>"""
+        runner = Mock(side_effect=[
+            PermissionError("denied"),
+            Mock(returncode=0, stderr="", stdout=device_xml),
+            Mock(returncode=0, stderr="", stdout=drivers_xml),
+        ])
+
+        details = WindowsDeviceService(runner).collect_details("USB\\BOOT")
+
+        self.assertEqual(details["driver_inf_path"], "oem65.inf")
+        self.assertEqual(runner.call_args.args[0][:2], ["pnputil.exe", "/enum-drivers"])
+
+    def test_pnputil_fallback_reports_signed_when_signer_exists(self):
+        xml = """<PnpUtil><Device InstanceId="USB\\SIGNED">
+            <DeviceDescription>Signed Device</DeviceDescription><Status>Started</Status>
+            <DriverName>oem42.inf</DriverName>
+            <MatchingDrivers><DriverName>
+              <SignerName>Microsoft Windows Hardware Compatibility Publisher</SignerName>
+              <Status>BestRanked/Installed</Status>
+            </DriverName></MatchingDrivers>
+        </Device></PnpUtil>"""
+        runner = Mock(side_effect=[
+            PermissionError("denied"), Mock(returncode=0, stderr="", stdout=xml),
+        ])
+
+        details = WindowsDeviceService(runner).collect_details("USB\\SIGNED")
+
+        self.assertTrue(details["driver_is_signed"])
+        self.assertEqual(
+            details["driver_signer"],
+            "Microsoft Windows Hardware Compatibility Publisher",
+        )
+
+    def test_masked_inf_resolution_failure_keeps_safe_details(self):
+        device_xml = """<PnpUtil><Device InstanceId="USB\\BOOT">
+            <DeviceDescription>Bootloader</DeviceDescription><Status>Disconnected</Status>
+            <DriverName>oem36.---</DriverName>
+            <MatchingDrivers><DriverName>
+              <OriginalName>android_general.inf</OriginalName>
+              <ProviderName>Google, Inc.</ProviderName>
+            </DriverName></MatchingDrivers>
+        </Device></PnpUtil>"""
+        runner = Mock(side_effect=[
+            PermissionError("denied"),
+            Mock(returncode=0, stderr="", stdout=device_xml),
+            Mock(returncode=1, stderr="access denied", stdout=""),
+        ])
+
+        details = WindowsDeviceService(runner).collect_details("USB\\BOOT")
+
+        self.assertEqual(details["name"], "Bootloader")
+        self.assertEqual(details["driver_inf_path"], "oem36.---")
 
     def test_enable_disable_uses_argument_list(self):
         runner = Mock(return_value=Mock(returncode=0, stdout="done", stderr=""))
@@ -197,6 +281,66 @@ class WindowsDeviceTabTests(unittest.TestCase):
         self.assertEqual(tab.table.rowCount(), 0)
         self.assertEqual(tab.count_label.text(), "Device refresh failed")
         tab.close()
+
+    def test_refresh_preserves_selected_device(self):
+        tab = self.build_tab()
+        devices = [
+            {"name": "Camera", "class": "Camera", "health": "Healthy", "status": "OK",
+             "manufacturer": "V", "driver_provider": "V", "driver_version": "1",
+             "driver_date": "2026", "problem_code": "", "instance_id": "USB\\CAM", "enabled": True},
+            {"name": "Adapter", "class": "Net", "health": "Healthy", "status": "OK",
+             "manufacturer": "V", "driver_provider": "V", "driver_version": "2",
+             "driver_date": "2026", "problem_code": "", "instance_id": "PCI\\NET", "enabled": True},
+        ]
+        tab._loaded(devices)
+        camera_row = next(
+            row for row in range(tab.table.rowCount())
+            if tab.table.item(row, 0).data(Qt.UserRole) == "USB\\CAM"
+        )
+        tab.table.selectRow(camera_row)
+
+        tab._loaded(list(reversed(devices)))
+
+        self.assertEqual(tab.selected_device()["instance_id"], "USB\\CAM")
+        tab.close()
+
+    def test_details_populate_panel_and_copy_hardware_ids(self):
+        tab = self.build_tab()
+        details = {
+            "instance_id": "USB\\CAM", "hardware_ids": ["USB\\VID_1234"],
+            "driver_is_signed": True, "driver_signer": "Trusted Vendor",
+        }
+        with patch("app.pages.windows.devices_tab.QMessageBox.information"):
+            tab._copy_loaded_hardware_ids(details)
+        self.assertIn("Driver Is Signed: True", tab.details_panel.toPlainText())
+        self.assertEqual(QApplication.clipboard().text(), "USB\\VID_1234")
+        tab.close()
+
+
+class MainWindowLifecycleTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_close_waits_for_running_child_thread(self):
+        with patch.object(QTimer, "singleShot"):
+            window = MainWindow()
+        window.show()
+        self.app.processEvents()
+        thread = QThread(window)
+        thread.start()
+        self.assertTrue(thread.isRunning())
+
+        self.assertFalse(window.close())
+        self.assertTrue(window.isVisible())
+        self.assertIn("Waiting for background", window.statusBar().currentMessage())
+
+        thread.quit()
+        self.assertTrue(thread.wait(2000))
+        with patch.object(QTimer, "singleShot", side_effect=lambda _, callback: callback()):
+            window._close_when_workers_finish()
+        self.app.processEvents()
+        self.assertFalse(window.isVisible())
 
 
 if __name__ == "__main__":
