@@ -260,17 +260,21 @@ class DevicesTab(QWidget):
     def show_selected_details(self):
         device = self.selected_device()
         if device:
+            instance_id = device["instance_id"]
             self._start_action(
-                lambda: self.service.collect_details(device["instance_id"]),
-                self._show_details,
+                lambda: self.service.collect_details(instance_id),
+                self._for_selected_device(instance_id, self._show_details),
+                instance_id,
             )
 
     def verify_selected_hardware(self):
         device = self.selected_device()
         if device:
+            instance_id = device["instance_id"]
             self._start_action(
-                lambda: self.service.verify_hardware(device["instance_id"]),
-                self._show_verification,
+                lambda: self.service.verify_hardware(instance_id),
+                self._for_selected_device(instance_id, self._show_verification),
+                instance_id,
             )
 
     def _show_details(self, details):
@@ -283,9 +287,11 @@ class DevicesTab(QWidget):
         if not device:
             return
         if not self.selected_details:
+            instance_id = device["instance_id"]
             self._start_action(
-                lambda: self.service.collect_details(device["instance_id"]),
-                self._copy_loaded_hardware_ids,
+                lambda: self.service.collect_details(instance_id),
+                self._for_selected_device(instance_id, self._copy_loaded_hardware_ids),
+                instance_id,
             )
             return
         self._copy_loaded_hardware_ids(self.selected_details)
@@ -306,14 +312,22 @@ class DevicesTab(QWidget):
         if not device:
             return
         if not self.selected_details:
+            instance_id = device["instance_id"]
             self._start_action(
-                lambda: self.service.collect_details(device["instance_id"]),
-                self._choose_driver_export,
+                lambda: self.service.collect_details(instance_id),
+                self._for_selected_device(
+                    instance_id,
+                    lambda details: self._choose_driver_export(details, instance_id),
+                ),
+                instance_id,
             )
             return
-        self._choose_driver_export(self.selected_details)
+        self._choose_driver_export(self.selected_details, device["instance_id"])
 
-    def _choose_driver_export(self, details):
+    def _choose_driver_export(self, details, instance_id=None):
+        instance_id = instance_id or str(details.get("instance_id") or "")
+        if not self._same_device_selected(instance_id):
+            return
         self._show_details(details)
         driver_inf = str(details.get("driver_inf_path") or "")
         if not DeviceOperationPolicy.valid_driver_inf(driver_inf):
@@ -323,7 +337,8 @@ class DevicesTab(QWidget):
         if destination:
             self.pending_action = (
                 lambda: self.service.export_driver(driver_inf, destination),
-                self._driver_exported,
+                self._for_selected_device(instance_id, self._driver_exported),
+                instance_id,
             )
             if self.action_thread is None:
                 self._start_pending_action()
@@ -352,6 +367,17 @@ class DevicesTab(QWidget):
         )
         dialog(self, f"Hardware Verification - {result['verification']}", message)
 
+    def _same_device_selected(self, instance_id):
+        device = self.selected_device()
+        return bool(device and device["instance_id"] == instance_id)
+
+    def _for_selected_device(self, instance_id, completed):
+        def apply_if_current(result):
+            if self._same_device_selected(instance_id):
+                completed(result)
+
+        return apply_if_current
+
     @staticmethod
     def _format_details(details):
         lines = []
@@ -362,7 +388,7 @@ class DevicesTab(QWidget):
             lines.append(f"{key.replace('_', ' ').title()}: {display}")
         return "\n".join(lines)
 
-    def _start_action(self, operation, completed):
+    def _start_action(self, operation, completed, instance_id=None):
         if self.action_thread is not None:
             return
         self.action_thread = QThread(self)
@@ -370,7 +396,12 @@ class DevicesTab(QWidget):
         self.action_worker.moveToThread(self.action_thread)
         self.action_thread.started.connect(self.action_worker.run)
         self.action_worker.succeeded.connect(completed)
-        self.action_worker.failed.connect(self._action_failed)
+        if instance_id is None:
+            self.action_worker.failed.connect(self._action_failed)
+        else:
+            self.action_worker.failed.connect(
+                self._for_selected_device(instance_id, self._action_failed)
+            )
         self.action_worker.finished.connect(self.action_thread.quit)
         self.action_worker.finished.connect(self.action_worker.deleteLater)
         self.action_thread.finished.connect(self._action_finished)
@@ -391,9 +422,12 @@ class DevicesTab(QWidget):
     def _start_pending_action(self):
         if self.pending_action is None or self.action_thread is not None:
             return
-        operation, completed = self.pending_action
+        operation, completed, instance_id = self.pending_action
         self.pending_action = None
-        self._start_action(operation, completed)
+        if not self._same_device_selected(instance_id):
+            self.update_actions()
+            return
+        self._start_action(operation, completed, instance_id)
 
     def export_devices(self, format_name):
         suffix = format_name.lower()
