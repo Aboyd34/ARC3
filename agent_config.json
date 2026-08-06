@@ -19,9 +19,13 @@
   ],
   "ignored_paths": [
     ".git",
+    ".venv",
+    "venv",
     "__pycache__",
     ".pytest_cache",
-    ".venv",
-    "venv"
+    "agent_output",
+    "backups",
+    "build",
+    "dist"
   ]
 }

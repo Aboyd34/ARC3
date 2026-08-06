@@ -1,4 +1,5 @@
 ﻿from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import QThread, QTimer
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -28,6 +29,7 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.app_settings = AppSettings()
+        self._close_pending = False
 
         self.setWindowTitle("ARC3 Toolkit")
         self.resize(1440, 880)
@@ -252,10 +254,31 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(saved_geometry)
 
     def closeEvent(self, event):
+        running_threads = [
+            thread for thread in self.findChildren(QThread)
+            if thread.isRunning()
+        ]
+        if running_threads:
+            event.ignore()
+            if not self._close_pending:
+                self._close_pending = True
+                self.statusBar().showMessage(
+                    "Waiting for background operations to finish..."
+                )
+                for thread in running_threads:
+                    thread.finished.connect(self._close_when_workers_finish)
+            return
+
         self.app_settings.set_geometry(
             self.saveGeometry()
         )
         self.app_settings.sync()
 
         event.accept()
+
+    def _close_when_workers_finish(self):
+        if any(thread.isRunning() for thread in self.findChildren(QThread)):
+            return
+        self._close_pending = False
+        QTimer.singleShot(0, self.close)
 
