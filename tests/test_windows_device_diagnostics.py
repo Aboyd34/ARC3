@@ -316,15 +316,41 @@ class WindowsDeviceTabTests(unittest.TestCase):
         self.assertEqual(QApplication.clipboard().text(), "USB\\VID_1234")
         tab.close()
 
+    def test_driver_export_waits_for_details_thread_to_finish(self):
+        tab = self.build_tab()
+        tab.action_thread = Mock()
+        tab.service.export_driver = Mock()
+        with patch(
+            "app.pages.windows.devices_tab.QFileDialog.getExistingDirectory",
+            return_value="C:\\Driver Export",
+        ), patch.object(tab, "_start_action") as start_action:
+            tab._choose_driver_export({
+                "instance_id": "USB\\CAM", "driver_inf_path": "oem42.inf",
+            })
+
+            start_action.assert_not_called()
+            self.assertIsNotNone(tab.pending_action)
+            tab.action_thread = None
+            tab._start_pending_action()
+
+        start_action.assert_called_once()
+        tab.close()
+
 
 class MainWindowLifecycleTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    @staticmethod
+    def build_window():
+        with patch.object(MainWindow, "build_interface"), patch.object(
+            MainWindow, "restore_window_geometry",
+        ):
+            return MainWindow()
+
     def test_close_waits_for_running_child_thread(self):
-        with patch.object(QTimer, "singleShot"):
-            window = MainWindow()
+        window = self.build_window()
         window.show()
         self.app.processEvents()
         thread = QThread(window)
@@ -337,6 +363,27 @@ class MainWindowLifecycleTests(unittest.TestCase):
 
         thread.quit()
         self.assertTrue(thread.wait(2000))
+        with patch.object(QTimer, "singleShot", side_effect=lambda _, callback: callback()):
+            window._close_when_workers_finish()
+        self.app.processEvents()
+        self.assertFalse(window.isVisible())
+
+    def test_close_tracks_thread_started_during_shutdown(self):
+        window = self.build_window()
+        window.show()
+        self.app.processEvents()
+        first_thread = QThread(window)
+        second_thread = QThread(window)
+        first_thread.start()
+
+        self.assertFalse(window.close())
+        second_thread.start()
+        first_thread.quit()
+        self.assertTrue(first_thread.wait(2000))
+        window._close_when_workers_finish()
+
+        second_thread.quit()
+        self.assertTrue(second_thread.wait(2000))
         with patch.object(QTimer, "singleShot", side_effect=lambda _, callback: callback()):
             window._close_when_workers_finish()
         self.app.processEvents()

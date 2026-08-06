@@ -265,8 +265,11 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(
                     "Waiting for background operations to finish..."
                 )
-                for thread in running_threads:
-                    thread.finished.connect(self._close_when_workers_finish)
+            for thread in running_threads:
+                thread.finished.connect(
+                    self._close_when_workers_finish,
+                    Qt.UniqueConnection,
+                )
             return
 
         self.app_settings.set_geometry(
@@ -277,7 +280,16 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def _close_when_workers_finish(self):
-        if any(thread.isRunning() for thread in self.findChildren(QThread)):
+        running_threads = [
+            thread for thread in self.findChildren(QThread)
+            if thread.isRunning()
+        ]
+        if running_threads:
+            for thread in running_threads:
+                thread.finished.connect(
+                    self._close_when_workers_finish,
+                    Qt.UniqueConnection,
+                )
             return
         self._close_pending = False
         QTimer.singleShot(0, self.close)

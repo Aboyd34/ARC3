@@ -34,6 +34,7 @@ class DevicesTab(QWidget):
         self.refresh_worker = None
         self.action_thread = None
         self.action_worker = None
+        self.pending_action = None
         self.selected_details = None
         self.build_ui()
         QTimer.singleShot(0, self.refresh)
@@ -320,10 +321,12 @@ class DevicesTab(QWidget):
             return
         destination = QFileDialog.getExistingDirectory(self, "Select Driver Export Folder")
         if destination:
-            self._start_action(
+            self.pending_action = (
                 lambda: self.service.export_driver(driver_inf, destination),
                 self._driver_exported,
             )
+            if self.action_thread is None:
+                self._start_pending_action()
 
     def _driver_exported(self, result):
         method = QMessageBox.information if result.success else QMessageBox.warning
@@ -382,6 +385,15 @@ class DevicesTab(QWidget):
         self.action_worker = None
         self.action_thread = None
         self.update_actions()
+        if self.pending_action is not None:
+            QTimer.singleShot(0, self._start_pending_action)
+
+    def _start_pending_action(self):
+        if self.pending_action is None or self.action_thread is not None:
+            return
+        operation, completed = self.pending_action
+        self.pending_action = None
+        self._start_action(operation, completed)
 
     def export_devices(self, format_name):
         suffix = format_name.lower()
