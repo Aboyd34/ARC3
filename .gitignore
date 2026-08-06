@@ -8,3 +8,4 @@ venv/
 .env.local
 backups/
 agent_output/
+agent_config.json.before_phase7_cleanup
