@@ -14,6 +14,8 @@ from typing import Any, Iterable, Mapping
 
 
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
+MAX_PERMISSION_LENGTH = 96
+_PERMISSION = re.compile(rf"[a-z][a-z0-9_.:-]{{0,{MAX_PERMISSION_LENGTH - 1}}}")
 
 
 def canonical_public_key(public_key_jwk: Mapping[str, Any]) -> str:
@@ -112,7 +114,7 @@ def _normalize_permissions(values: Iterable[str]) -> tuple[str, ...]:
     normalized = []
     for value in values:
         permission = str(value).strip().lower()
-        if not permission or not re.fullmatch(r"[a-z][a-z0-9_.:-]{0,63}", permission):
-            raise ValueError(f"invalid permission: {value!r}")
+        if not permission or not _PERMISSION.fullmatch(permission):
+            raise ValueError("invalid permission identifier")
         normalized.append(permission)
     return tuple(sorted(set(normalized)))

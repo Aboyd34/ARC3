@@ -29,9 +29,12 @@ class ReadOnlyHealthCollector:
                 "free": WindowsInfoService.format_bytes(disk.free),
                 "percent_used": round(disk.percent, 1),
             }
-        except (OSError, PermissionError):
+        except OSError:
             disk_health = {"available": False}
-        battery = psutil.sensors_battery()
+        try:
+            battery = psutil.sensors_battery()
+        except (AttributeError, OSError, NotImplementedError):
+            battery = None
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "status": "ok",

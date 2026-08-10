@@ -6,7 +6,6 @@ import ctypes
 from ctypes import wintypes
 import os
 from pathlib import Path
-import tempfile
 
 from .identity import P256IdentityProvider
 
@@ -74,10 +73,12 @@ class WindowsDPAPI:
                 ctypes.byref(entropy_blob), None, None, _CRYPTPROTECT_UI_FORBIDDEN,
                 ctypes.byref(output_blob),
             )
+            error = ctypes.get_last_error()
             if description:
                 self._kernel32.LocalFree(description)
         if not success:
-            error = ctypes.get_last_error()
+            if function_name == "CryptProtectData":
+                error = ctypes.get_last_error()
             raise KeyStoreError(f"Windows DPAPI operation failed with error {error}")
         try:
             return ctypes.string_at(output_blob.pbData, output_blob.cbData)
@@ -115,28 +116,32 @@ class WindowsDPAPIKeyStore:
             return self.load()
         provider = P256IdentityProvider.generate()
         protected = self._dpapi.protect(provider.export_private_pkcs8(), self._entropy)
-        self._write_atomic(_MAGIC + protected)
-        return provider
+        if self._write_if_absent(_MAGIC + protected):
+            return provider
+        return self.load()
 
-    def _write_atomic(self, content: bytes) -> None:
+    def _write_if_absent(self, content: bytes) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path: Path | None = None
         try:
-            with tempfile.NamedTemporaryFile(
-                mode="wb", delete=False, dir=self.path.parent,
-                prefix=f".{self.path.name}.", suffix=".tmp"
-            ) as handle:
+            descriptor = os.open(
+                self.path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+                0o600,
+            )
+        except FileExistsError:
+            return False
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
                 handle.write(content)
                 handle.flush()
                 os.fsync(handle.fileno())
-                temporary_path = Path(handle.name)
-            os.replace(temporary_path, self.path)
         except OSError as exc:
+            try:
+                self.path.unlink()
+            except OSError:
+                pass
             raise KeyStoreError(f"unable to write protected key store: {self.path}") from exc
-        finally:
-            if temporary_path is not None and temporary_path.exists():
-                temporary_path.unlink()
-
+        return True
 
 def _blob(value: bytes) -> tuple[_DataBlob, ctypes.Array[ctypes.c_ubyte]]:
     raw = bytes(value)
