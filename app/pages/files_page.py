@@ -19,6 +19,9 @@ class FilesPage(QWidget):
         self.analysis: FileAnalysis | None = None
         self.scan_thread = None
         self.scan_worker = None
+        self.export_thread = None
+        self.export_worker = None
+        self.export_destination = None
         self._build_ui()
 
     def _build_ui(self):
@@ -95,6 +98,10 @@ class FilesPage(QWidget):
         self.scan_thread.finished.connect(self.scan_thread.deleteLater)
         self.scan_thread.start()
 
+    def refresh(self):
+        """Refresh the active Files page exactly once through the F5 dispatcher."""
+        self.scan()
+
     def _scan_succeeded(self, analysis):
         self.analysis = analysis
         duplicate_paths = {
@@ -135,16 +142,41 @@ class FilesPage(QWidget):
         self.scan_button.setText("Analyzing…" if scanning else "Analyze Files")
 
     def export_report(self):
-        if self.analysis is None:
+        if self.analysis is None or self.export_thread is not None:
             return
         destination, _ = QFileDialog.getSaveFileName(
             self, "Export File Analysis", "arc3-file-analysis.json", "JSON files (*.json)"
         )
         if not destination:
             return
-        try:
-            self.service.export_report(self.analysis, destination)
-        except OSError as exc:
-            self.summary.setText(f"Report export failed: {exc}")
-            return
-        self.summary.setText(f"Analysis report exported to {Path(destination).name}.")
+        self.export_button.setEnabled(False)
+        self.export_destination = Path(destination)
+        analysis = self.analysis
+        destination_path = self.export_destination
+        self.export_thread = QThread(self)
+        self.export_worker = CallableWorker(
+            lambda: self.service.export_report(analysis, destination_path)
+        )
+        self.export_worker.moveToThread(self.export_thread)
+        self.export_thread.started.connect(self.export_worker.run)
+        self.export_worker.succeeded.connect(self._export_succeeded)
+        self.export_worker.failed.connect(self._export_failed)
+        self.export_worker.finished.connect(self.export_thread.quit)
+        self.export_worker.finished.connect(self.export_worker.deleteLater)
+        self.export_thread.finished.connect(self._export_finished)
+        self.export_thread.finished.connect(self.export_thread.deleteLater)
+        self.export_thread.start()
+
+    def _export_succeeded(self, _result):
+        self.summary.setText(
+            f"Analysis report exported to {self.export_destination.name}."
+        )
+
+    def _export_failed(self, message):
+        self.summary.setText(f"Report export failed: {message}")
+
+    def _export_finished(self):
+        self.export_worker = None
+        self.export_thread = None
+        self.export_destination = None
+        self.export_button.setEnabled(self.analysis is not None)

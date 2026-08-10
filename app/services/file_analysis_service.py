@@ -91,4 +91,6 @@ class FileAnalysisService:
                 for record in analysis.files
             ],
         }
-        Path(destination).write_text(json.dumps(report, indent=2), encoding="utf-8")
+        with Path(destination).open("x", encoding="utf-8") as stream:
+            json.dump(report, stream, indent=2)
+            stream.write("\n")

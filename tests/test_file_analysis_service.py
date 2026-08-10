@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -65,6 +66,26 @@ class FileAnalysisServiceTests(unittest.TestCase):
         self.assertEqual(1, report["duplicate_group_count"])
         self.assertEqual(hashlib.sha256(payload).hexdigest(), report["files"][0]["sha256"])
         self.assertTrue(report["files"][0]["duplicate"])
+
+    def test_report_does_not_replace_existing_evidence(self):
+        service = FileAnalysisService()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "file").write_bytes(b"data")
+            analysis = service.analyze(root)
+            report_path = root / "report.json"
+            report_path.write_text("existing evidence", encoding="utf-8")
+            with self.assertRaises(FileExistsError):
+                service.export_report(analysis, report_path)
+            self.assertEqual("existing evidence", report_path.read_text(encoding="utf-8"))
+
+    def test_refresh_delegates_to_one_guarded_scan(self):
+        page = FilesPage(FileAnalysisService())
+        with patch.object(page, "scan") as scan:
+            page.refresh()
+        scan.assert_called_once_with()
+        page.close()
+        page.deleteLater()
 
     def test_page_starts_read_only_and_empty(self):
         page = FilesPage(FileAnalysisService())
