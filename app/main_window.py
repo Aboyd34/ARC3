@@ -71,7 +71,8 @@ class MainWindow(QMainWindow):
         self.pages = QStackedWidget()
         self.pages.setObjectName("pageStack")
 
-        self.pages.addWidget(DashboardPage())
+        self.dashboard_page = DashboardPage(self)
+        self.pages.addWidget(self.dashboard_page)
         self.pages.addWidget(WindowsWorkspace())
 
         self.pages.addWidget(AndroidWorkspace())

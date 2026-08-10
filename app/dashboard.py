@@ -1,8 +1,8 @@
-﻿import platform
-from datetime import datetime
+from __future__ import annotations
 
-import psutil
-from PySide6.QtCore import QTimer
+from functools import partial
+
+from PySide6.QtCore import QThread, QTimer, Qt
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -10,238 +10,189 @@ from PySide6.QtWidgets import (
     QLabel,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
+from shiboken6 import isValid
+
+from app.services.health_engine import HealthEngine, HealthSnapshot, HealthState
+from app.workers.callable_worker import CallableWorker
 
 
-class StatCard(QFrame):
-    def __init__(self, title_text):
+class HealthCard(QFrame):
+    def __init__(self, title: str, show_progress: bool = True) -> None:
         super().__init__()
-
         self.setObjectName("statCard")
-
-        self.title_label = QLabel(title_text)
+        self.title_label = QLabel(title)
         self.title_label.setObjectName("cardTitle")
-
-        self.value_label = QLabel("0%")
+        self.value_label = QLabel("--")
         self.value_label.setObjectName("cardValue")
-
+        self.state_label = QLabel("Collecting health data...")
+        self.state_label.setObjectName("systemValue")
         self.details_label = QLabel("Loading...")
         self.details_label.setObjectName("cardDetails")
-
+        self.details_label.setWordWrap(True)
         self.progress_bar = QProgressBar()
         self.progress_bar.setObjectName("usageBar")
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setTextVisible(False)
-
+        self.progress_bar.setVisible(show_progress)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 20)
-        layout.setSpacing(10)
-
+        layout.setSpacing(8)
         layout.addWidget(self.title_label)
         layout.addWidget(self.value_label)
+        layout.addWidget(self.state_label)
         layout.addWidget(self.details_label)
         layout.addStretch()
         layout.addWidget(self.progress_bar)
 
-    def update_value(self, percentage, details):
-        self.value_label.setText(f"{percentage}%")
-        self.details_label.setText(details)
-        self.progress_bar.setValue(percentage)
+    def update_metric(self, value: str, state: HealthState, detail: str) -> None:
+        self.value_label.setText(value)
+        self.state_label.setText(state.name)
+        self.details_label.setText(detail)
+        if self.progress_bar.isVisible():
+            try:
+                self.progress_bar.setValue(int(float(value.rstrip("%"))))
+            except ValueError:
+                self.progress_bar.setValue(0)
 
 
 class DashboardPage(QWidget):
-    def __init__(self):
+    REFRESH_INTERVAL_MS = 10_000
+
+    def __init__(
+        self,
+        main_window=None,
+        service: HealthEngine | None = None,
+        auto_refresh: bool = True,
+    ) -> None:
         super().__init__()
-
-        self.cpu_card = StatCard("CPU Usage")
-        self.ram_card = StatCard("Memory Usage")
-        self.disk_card = StatCard("System Drive")
-
-        self.updated_label = QLabel("Last updated: --")
-        self.updated_label.setObjectName("updatedLabel")
-
-        self.refresh_button = QPushButton("Refresh Now")
-        self.refresh_button.setObjectName("primaryButton")
-        self.refresh_button.clicked.connect(self.update_stats)
-
-        self.system_card = self.create_system_card()
-
-        self.build_ui()
-
+        self.main_window = main_window
+        self.service = service or HealthEngine()
+        self.snapshot: HealthSnapshot | None = None
+        self.refresh_thread = None
+        self.refresh_worker = None
+        self._build_ui()
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update_stats)
-        self.timer.start(1000)
+        self.timer.timeout.connect(self.refresh)
+        if auto_refresh:
+            self.timer.start(self.REFRESH_INTERVAL_MS)
+            QTimer.singleShot(0, self.refresh)
 
-        self.update_stats()
-
-    def build_ui(self):
+    def _build_ui(self) -> None:
         heading = QLabel("System Dashboard")
         heading.setObjectName("pageTitle")
-
-        subtitle = QLabel(
-            "Live performance and system information for this computer."
-        )
+        subtitle = QLabel("Read-only Windows and ARC3 application health overview.")
         subtitle.setObjectName("pageSubtitle")
+        self.updated_label = QLabel("Not refreshed")
+        self.updated_label.setObjectName("updatedLabel")
+        self.refresh_button = QPushButton("Refresh Now")
+        self.refresh_button.setObjectName("primaryButton")
+        self.refresh_button.clicked.connect(self.refresh)
 
-        heading_layout = QVBoxLayout()
-        heading_layout.setSpacing(2)
-        heading_layout.addWidget(heading)
-        heading_layout.addWidget(subtitle)
+        heading_text = QVBoxLayout()
+        heading_text.setSpacing(2)
+        heading_text.addWidget(heading)
+        heading_text.addWidget(subtitle)
+        top = QHBoxLayout()
+        top.addLayout(heading_text)
+        top.addStretch()
+        top.addWidget(self.updated_label)
+        top.addWidget(self.refresh_button)
 
-        actions_layout = QHBoxLayout()
-        actions_layout.addStretch()
-        actions_layout.addWidget(self.updated_label)
-        actions_layout.addWidget(self.refresh_button)
-
-        top_layout = QHBoxLayout()
-        top_layout.addLayout(heading_layout)
-        top_layout.addStretch()
-        top_layout.addLayout(actions_layout)
-
+        self.overall_card = HealthCard("Overall Health", show_progress=False)
+        self.cpu_card = HealthCard("CPU Utilization")
+        self.memory_card = HealthCard("Memory Utilization")
+        self.storage_card = HealthCard("Primary Storage")
+        self.uptime_card = HealthCard("Windows Uptime", show_progress=False)
+        self.application_card = HealthCard("ARC3 Application Health", show_progress=False)
         cards = QGridLayout()
-        cards.setHorizontalSpacing(18)
-        cards.setVerticalSpacing(18)
+        cards.setSpacing(18)
+        for index, card in enumerate((
+            self.overall_card, self.cpu_card, self.memory_card,
+            self.storage_card, self.uptime_card, self.application_card,
+        )):
+            cards.addWidget(card, index // 3, index % 3)
 
-        cards.addWidget(self.cpu_card, 0, 0)
-        cards.addWidget(self.ram_card, 0, 1)
-        cards.addWidget(self.disk_card, 0, 2)
-        cards.addWidget(self.system_card, 1, 0, 1, 3)
+        warning_card = QFrame()
+        warning_card.setObjectName("wideCard")
+        warning_title = QLabel("Active Warnings")
+        warning_title.setObjectName("cardTitle")
+        self.warnings_label = QLabel("Health data has not been collected.")
+        self.warnings_label.setObjectName("systemValue")
+        self.warnings_label.setWordWrap(True)
+        self.warnings_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        warning_layout = QVBoxLayout(warning_card)
+        warning_layout.setContentsMargins(22, 20, 22, 20)
+        warning_layout.addWidget(warning_title)
+        warning_layout.addWidget(self.warnings_label)
 
-        page_layout = QVBoxLayout(self)
-        page_layout.setContentsMargins(28, 24, 28, 28)
-        page_layout.setSpacing(22)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.addLayout(cards)
+        content_layout.addWidget(warning_card)
+        content_layout.addStretch()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(content)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 24, 28, 28)
+        layout.setSpacing(18)
+        layout.addLayout(top)
+        layout.addWidget(scroll, 1)
 
-        page_layout.addLayout(top_layout)
-        page_layout.addLayout(cards)
-        page_layout.addStretch()
+    def refresh(self) -> bool:
+        """F5/timer entry point; start no more than one snapshot collection."""
+        if not isValid(self) or not isValid(self.refresh_button):
+            return False
+        if self.refresh_thread is not None:
+            return False
+        active_workers = 0
+        if self.main_window is not None and isValid(self.main_window):
+            active_workers = sum(
+                thread.isRunning() for thread in self.main_window.findChildren(QThread)
+            )
+        self.refresh_button.setEnabled(False)
+        self.updated_label.setText("Collecting health data...")
+        self.refresh_thread = QThread(self)
+        self.refresh_worker = CallableWorker(partial(self.service.collect, active_workers))
+        self.refresh_worker.moveToThread(self.refresh_thread)
+        self.refresh_thread.started.connect(self.refresh_worker.run)
+        self.refresh_worker.succeeded.connect(self._snapshot_loaded)
+        self.refresh_worker.failed.connect(self._snapshot_failed)
+        self.refresh_worker.finished.connect(self.refresh_thread.quit)
+        self.refresh_worker.finished.connect(self.refresh_worker.deleteLater)
+        self.refresh_thread.finished.connect(self._refresh_finished)
+        self.refresh_thread.finished.connect(self.refresh_thread.deleteLater)
+        self.refresh_thread.start()
+        return True
 
-    def create_system_card(self):
-        card = QFrame()
-        card.setObjectName("wideCard")
+    def _snapshot_loaded(self, snapshot: HealthSnapshot) -> None:
+        self.snapshot = snapshot
+        self.overall_card.update_metric(snapshot.overall_state.name, snapshot.overall_state, "Worst current component state")
+        self.cpu_card.update_metric(f"{snapshot.cpu.value}%", snapshot.cpu.state, snapshot.cpu.detail)
+        self.memory_card.update_metric(f"{snapshot.memory.value}%", snapshot.memory.state, snapshot.memory.detail)
+        self.storage_card.update_metric(f"{snapshot.storage.value}%", snapshot.storage.state, snapshot.storage.detail)
+        self.uptime_card.update_metric(snapshot.uptime.detail, snapshot.uptime.state, "Time since Windows last booted")
+        self.application_card.update_metric(snapshot.application.state.name, snapshot.application.state, snapshot.application.detail)
+        self.warnings_label.setText("\n".join(snapshot.warnings) if snapshot.warnings else "No active warnings.")
+        self.updated_label.setText(snapshot.collected_at.astimezone().strftime("Updated %I:%M:%S %p"))
+        self._show_status(f"System health: {snapshot.overall_state.name}")
 
-        title = QLabel("System Information")
-        title.setObjectName("cardTitle")
+    def _snapshot_failed(self, message: str) -> None:
+        self.updated_label.setText("Health collection failed")
+        self.warnings_label.setText(f"Health data unavailable: {message}")
+        self._show_status("System health collection failed")
 
-        self.os_value = QLabel()
-        self.computer_value = QLabel()
-        self.processor_value = QLabel()
-        self.uptime_value = QLabel()
+    def _refresh_finished(self) -> None:
+        self.refresh_worker = None
+        self.refresh_thread = None
+        self.refresh_button.setEnabled(True)
 
-        for label in (
-            self.os_value,
-            self.computer_value,
-            self.processor_value,
-            self.uptime_value,
-        ):
-            label.setObjectName("systemValue")
-            label.setWordWrap(True)
-
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(30)
-        grid.setVerticalSpacing(14)
-
-        grid.addWidget(self.create_field_label("Operating System"), 0, 0)
-        grid.addWidget(self.os_value, 0, 1)
-
-        grid.addWidget(self.create_field_label("Computer Name"), 1, 0)
-        grid.addWidget(self.computer_value, 1, 1)
-
-        grid.addWidget(self.create_field_label("Processor"), 0, 2)
-        grid.addWidget(self.processor_value, 0, 3)
-
-        grid.addWidget(self.create_field_label("System Uptime"), 1, 2)
-        grid.addWidget(self.uptime_value, 1, 3)
-
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(22, 20, 22, 20)
-        layout.setSpacing(16)
-
-        layout.addWidget(title)
-        layout.addLayout(grid)
-
-        return card
-
-    @staticmethod
-    def create_field_label(text):
-        label = QLabel(text)
-        label.setObjectName("fieldLabel")
-        return label
-
-    def update_stats(self):
-        cpu = int(psutil.cpu_percent(interval=None))
-
-        memory = psutil.virtual_memory()
-        ram = int(memory.percent)
-
-        disk = psutil.disk_usage("C:\\")
-        disk_percent = int(disk.percent)
-
-        self.cpu_card.update_value(
-            cpu,
-            f"{psutil.cpu_count(logical=True)} logical processors",
-        )
-
-        used_ram = self.format_bytes(memory.used)
-        total_ram = self.format_bytes(memory.total)
-
-        self.ram_card.update_value(
-            ram,
-            f"{used_ram} used of {total_ram}",
-        )
-
-        used_disk = self.format_bytes(disk.used)
-        total_disk = self.format_bytes(disk.total)
-
-        self.disk_card.update_value(
-            disk_percent,
-            f"{used_disk} used of {total_disk}",
-        )
-
-        self.os_value.setText(
-            f"{platform.system()} {platform.release()} "
-            f"({platform.version()})"
-        )
-
-        self.computer_value.setText(platform.node() or "Unknown")
-
-        self.processor_value.setText(
-            platform.processor()
-            or platform.machine()
-            or "Unknown"
-        )
-
-        uptime_seconds = (
-            datetime.now().timestamp() - psutil.boot_time()
-        )
-
-        self.uptime_value.setText(
-            self.format_uptime(int(uptime_seconds))
-        )
-
-        self.updated_label.setText(
-            datetime.now().strftime("Updated %I:%M:%S %p")
-        )
-
-    @staticmethod
-    def format_bytes(value):
-        size = float(value)
-
-        for unit in ("B", "KB", "MB", "GB", "TB"):
-            if size < 1024:
-                return f"{size:.1f} {unit}"
-            size /= 1024
-
-        return f"{size:.1f} PB"
-
-    @staticmethod
-    def format_uptime(seconds):
-        days, remainder = divmod(seconds, 86400)
-        hours, remainder = divmod(remainder, 3600)
-        minutes, _ = divmod(remainder, 60)
-
-        if days:
-            return f"{days}d {hours}h {minutes}m"
-
-        return f"{hours}h {minutes}m"
+    def _show_status(self, message: str) -> None:
+        if self.main_window is not None and self.main_window.statusBar() is not None:
+            self.main_window.statusBar().showMessage(message, 5000)
