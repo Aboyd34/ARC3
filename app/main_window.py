@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 
 from app.pages.dashboard_page import DashboardPage
 from app.pages.android_workspace import AndroidWorkspace
+from app.pages.connectivity_page import ConnectivityPage
 from app.pages.settings_page import SettingsPage
 from app.pages.windows.windows_workspace import WindowsWorkspace
 from app.settings import AppSettings
@@ -42,6 +43,7 @@ class MainWindow(QMainWindow):
             "Firmware",
             "Files",
             "Developer",
+            "Connectivity",
             "Settings",
         ]
 
@@ -101,6 +103,8 @@ class MainWindow(QMainWindow):
                 ),
             )
         )
+
+        self.pages.addWidget(ConnectivityPage(self))
 
         self.pages.addWidget(SettingsPage(self))
 
@@ -199,6 +203,10 @@ class MainWindow(QMainWindow):
             (
                 "Developer",
                 QStyle.SP_FileDialogDetailedView,
+            ),
+            (
+                "Connectivity",
+                QStyle.SP_DriveNetIcon,
             ),
             (
                 "Settings",

@@ -8,3 +8,8 @@ venv/
 .env.local
 backups/
 agent_output/
+.smoke-data/
+tests/.transport-trust-*.json
+tests/.ui-pending-*.json
+tests/.ui-trusted-*.json
+agent_config.json.before_phase7_cleanup

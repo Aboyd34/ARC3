@@ -222,6 +222,25 @@ class WindowsDeviceTabTests(unittest.TestCase):
         with patch("app.pages.windows.devices_tab.QTimer.singleShot"):
             return DevicesTab()
 
+    @staticmethod
+    def two_devices():
+        return [
+            {"name": "Device A", "class": "USB", "health": "Healthy", "status": "OK",
+             "manufacturer": "V", "driver_provider": "V", "driver_version": "1",
+             "driver_date": "2026", "problem_code": "", "instance_id": "USB\\A", "enabled": True},
+            {"name": "Device B", "class": "USB", "health": "Healthy", "status": "OK",
+             "manufacturer": "V", "driver_provider": "V", "driver_version": "1",
+             "driver_date": "2026", "problem_code": "", "instance_id": "USB\\B", "enabled": True},
+        ]
+
+    @staticmethod
+    def select_instance(tab, instance_id):
+        row = next(
+            row for row in range(tab.table.rowCount())
+            if tab.table.item(row, 0).data(Qt.UserRole) == instance_id
+        )
+        tab.table.selectRow(row)
+
     def test_search_health_filter_and_sortable_table(self):
         tab = self.build_tab()
         tab._loaded([
@@ -316,8 +335,78 @@ class WindowsDeviceTabTests(unittest.TestCase):
         self.assertEqual(QApplication.clipboard().text(), "USB\\VID_1234")
         tab.close()
 
+    def test_stale_details_callback_does_not_update_panel(self):
+        tab = self.build_tab()
+        tab._loaded(self.two_devices())
+        self.select_instance(tab, "USB\\A")
+        with patch.object(tab, "_start_action") as start_action:
+            tab.show_selected_details()
+        callback = start_action.call_args.args[1]
+        self.select_instance(tab, "USB\\B")
+
+        callback({"instance_id": "USB\\A", "hardware_ids": ["A-ID"]})
+
+        self.assertEqual(tab.details_panel.toPlainText(), "")
+        self.assertIsNone(tab.selected_details)
+        tab.close()
+
+    def test_stale_copy_callback_does_not_copy_hardware_ids(self):
+        tab = self.build_tab()
+        tab._loaded(self.two_devices())
+        self.select_instance(tab, "USB\\A")
+        QApplication.clipboard().setText("unchanged")
+        with patch.object(tab, "_start_action") as start_action:
+            tab.copy_hardware_ids()
+        callback = start_action.call_args.args[1]
+        self.select_instance(tab, "USB\\B")
+
+        with patch("app.pages.windows.devices_tab.QMessageBox.information") as information:
+            callback({"instance_id": "USB\\A", "hardware_ids": ["A-ID"]})
+
+        self.assertEqual(QApplication.clipboard().text(), "unchanged")
+        information.assert_not_called()
+        tab.close()
+
+    def test_stale_verification_callback_does_not_open_dialog(self):
+        tab = self.build_tab()
+        tab._loaded(self.two_devices())
+        self.select_instance(tab, "USB\\A")
+        with patch.object(tab, "_start_action") as start_action:
+            tab.verify_selected_hardware()
+        callback = start_action.call_args.args[1]
+        self.select_instance(tab, "USB\\B")
+
+        with patch("app.pages.windows.devices_tab.QMessageBox.information") as information:
+            callback({"verification": "Verified", "message": "A", "checks": {}, "details": {}})
+
+        information.assert_not_called()
+        tab.close()
+
+    def test_stale_export_details_callback_does_not_prompt_or_export(self):
+        tab = self.build_tab()
+        tab._loaded(self.two_devices())
+        self.select_instance(tab, "USB\\A")
+        tab.service.export_driver = Mock()
+        with patch.object(tab, "_start_action") as start_action:
+            tab.export_selected_driver()
+        callback = start_action.call_args.args[1]
+        self.select_instance(tab, "USB\\B")
+
+        with patch(
+            "app.pages.windows.devices_tab.QFileDialog.getExistingDirectory",
+            return_value="C:\\Driver Export",
+        ) as export_dialog:
+            callback({"instance_id": "USB\\A", "driver_inf_path": "oem42.inf"})
+
+        export_dialog.assert_not_called()
+        tab.service.export_driver.assert_not_called()
+        self.assertIsNone(tab.pending_action)
+        tab.close()
+
     def test_driver_export_waits_for_details_thread_to_finish(self):
         tab = self.build_tab()
+        tab._loaded([self.two_devices()[0]])
+        self.select_instance(tab, "USB\\A")
         tab.action_thread = Mock()
         tab.service.export_driver = Mock()
         with patch(
@@ -325,7 +414,7 @@ class WindowsDeviceTabTests(unittest.TestCase):
             return_value="C:\\Driver Export",
         ), patch.object(tab, "_start_action") as start_action:
             tab._choose_driver_export({
-                "instance_id": "USB\\CAM", "driver_inf_path": "oem42.inf",
+                "instance_id": "USB\\A", "driver_inf_path": "oem42.inf",
             })
 
             start_action.assert_not_called()
@@ -336,6 +425,27 @@ class WindowsDeviceTabTests(unittest.TestCase):
         start_action.assert_called_once()
         tab.close()
 
+    def test_queued_driver_export_is_discarded_after_selection_changes(self):
+        tab = self.build_tab()
+        tab._loaded(self.two_devices())
+        self.select_instance(tab, "USB\\A")
+        tab.action_thread = Mock()
+        with patch(
+            "app.pages.windows.devices_tab.QFileDialog.getExistingDirectory",
+            return_value="C:\\Driver Export",
+        ):
+            tab._choose_driver_export({
+                "instance_id": "USB\\A", "driver_inf_path": "oem42.inf",
+            })
+        self.select_instance(tab, "USB\\B")
+        tab.action_thread = None
+
+        with patch.object(tab, "_start_action") as start_action:
+            tab._start_pending_action()
+
+        start_action.assert_not_called()
+        self.assertIsNone(tab.pending_action)
+        tab.close()
 
 class MainWindowLifecycleTests(unittest.TestCase):
     @classmethod
