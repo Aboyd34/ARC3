@@ -1,6 +1,7 @@
 import unittest
 import tempfile
 import os
+import time
 
 from app.connectivity.identity import P256IdentityProvider
 from app.connectivity.models import TrustedDevice
@@ -16,11 +17,34 @@ class ConnectivityProtocolTests(unittest.TestCase):
     def test_replay_guard_persists_across_instances(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "replay.json")
+            now = time.time_ns() // 1_000_000
             first = ReplayGuard(path=path)
-            first.check_and_record("a" * 64, "AQEBAQEBAQEBAQEBAQEBAQ", 1000, 1000)
+            first.check_and_record("a" * 64, "AQEBAQEBAQEBAQEBAQEBAQ", now, now)
             second = ReplayGuard(path=path)
             with self.assertRaises(VerificationError):
-                second.check_and_record("a" * 64, "AQEBAQEBAQEBAQEBAQEBAQ", 1000, 1000)
+                second.check_and_record("a" * 64, "AQEBAQEBAQEBAQEBAQEBAQ", now, now)
+
+    def test_replay_guard_rejects_invalid_schema(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "replay.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write('{"schema_version":2,"entries":[]}')
+            with self.assertRaisesRegex(VerificationError, "schema"):
+                ReplayGuard(path=path)
+
+    def test_replay_guard_caps_loaded_entries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "replay.json")
+            now = time.time_ns() // 1_000_000
+            entries = [
+                {"sender_id": "a" * 64, "nonce": str(index), "timestamp_ms": now}
+                for index in range(5)
+            ]
+            import json
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump({"schema_version": 1, "entries": entries}, handle)
+            guard = ReplayGuard(path=path, max_entries=2)
+            self.assertEqual(2, len(guard._seen))
     def setUp(self):
         self.provider = P256IdentityProvider.generate()
         identity = self.provider.identity("Office PC")

@@ -1,14 +1,15 @@
 import gc
 import os
 from pathlib import Path
+import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import uuid
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication, QEvent
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from app.connectivity.identity import P256IdentityProvider
 from app.connectivity.pairing_service import PairingService, PendingPairingStore
@@ -52,13 +53,53 @@ class ConnectivityPageTests(unittest.TestCase):
         page.close()
         page.deleteLater()
 
+    def test_shutdown_stops_running_listener(self):
+        page = ConnectivityPage(pairing_service=self.service)
+        transport = Mock()
+        page.transport = transport
+        page.shutdown()
+        transport.stop.assert_called_once_with()
+        self.assertIsNone(page.transport)
+        page.deleteLater()
+
+    def test_private_lan_uses_selected_interface_and_app_data_tls(self):
+        page = ConnectivityPage(pairing_service=self.service)
+        page.lan_address.clear()
+        page.lan_address.addItem("192.168.1.25")
+        page.lan_checkbox.setChecked(True)
+        transport = Mock()
+        transport.running = False
+        with tempfile.TemporaryDirectory() as local_app_data, patch.dict(
+            os.environ, {"LOCALAPPDATA": local_app_data}
+        ), patch(
+            "app.pages.connectivity_page.QMessageBox.question",
+            return_value=QMessageBox.Yes,
+        ), patch(
+            "app.pages.connectivity_page.create_health_transport",
+            return_value=transport,
+        ) as create_transport:
+            page.toggle_listener()
+        kwargs = create_transport.call_args.kwargs
+        self.assertEqual("192.168.1.25", kwargs["host"])
+        self.assertTrue(str(kwargs["tls_keyfile"]).startswith(local_app_data))
+        transport.start.assert_called_once_with()
+        page.shutdown()
+        page.deleteLater()
+
     def test_main_window_sidebar_maps_connectivity_and_settings(self):
         from app.main_window import MainWindow
+
+        class StubConnectivityPage(QWidget):
+            def __init__(self, *_):
+                super().__init__()
+
+            def shutdown(self):
+                pass
 
         with (
             patch("app.main_window.WindowsWorkspace", QWidget),
             patch("app.main_window.AndroidWorkspace", QWidget),
-            patch("app.main_window.ConnectivityPage", QWidget),
+            patch("app.main_window.ConnectivityPage", StubConnectivityPage),
         ):
             window = MainWindow()
 

@@ -140,6 +140,7 @@ class PairingService:
         self.approver_provider = approver_provider
         self.approver_name = approver_name
         self.clock_ms = clock_ms or _clock_ms
+        self.recovery_error: str | None = None
         self._journal_path = self.pending_store.path.with_name("pairing_approval.journal.json")
         self._recover_approval()
 
@@ -188,14 +189,23 @@ class PairingService:
             payload = json.loads(self._journal_path.read_text(encoding="utf-8"))
             if payload.get("schema_version") != 1:
                 raise PairingError("unsupported pairing approval journal schema")
-            trusted = self.trusted_store._read_records().get(str(payload["trusted"]["device_id"]))
+            trusted = self.trusted_store.get(str(payload["trusted"]["device_id"]))
             if trusted is None:
                 from .models import TrustedDevice
                 self.trusted_store.trust(TrustedDevice.from_dict(payload["trusted"]))
             self.pending_store.remove(str(payload["request_id"]))
             self._clear_journal()
-        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
-            raise PairingError("pairing approval recovery failed") from exc
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            self.recovery_error = (
+                "Pairing approval recovery failed; the damaged journal was quarantined."
+            )
+            quarantine = self._journal_path.with_suffix(
+                self._journal_path.suffix + ".corrupt"
+            )
+            try:
+                os.replace(self._journal_path, quarantine)
+            except OSError:
+                pass
 
 
 def _clock_ms() -> int:

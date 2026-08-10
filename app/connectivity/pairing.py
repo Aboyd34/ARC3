@@ -11,14 +11,13 @@ import time
 from typing import Any, Callable, Mapping
 
 from .identity import P256IdentityProvider
-from .models import DeviceIdentity, TrustedDevice
+from .models import DeviceIdentity, MAX_PERMISSION_LENGTH, TrustedDevice
 
 
 PAIRING_VERSION = 1
 PAIRING_MAX_AGE_MS = 10 * 60 * 1000
 MAX_DEVICE_NAME_LENGTH = 128
 MAX_PERMISSION_COUNT = 32
-MAX_PERMISSION_LENGTH = 96
 
 
 class PairingError(ValueError):
@@ -147,7 +146,7 @@ class PairingApproval:
         return TrustedDevice.from_identity(request.device, self.permissions)
 
     def _validate_bounds(self) -> None:
-        _validate_device_name(self.device.name)
+        _validate_device_name(self.approver.name)
         if len(self.signature) > 512:
             raise PairingError("pairing signature is too large")
 
@@ -166,16 +165,21 @@ class PairingApproval:
         }
         if set(value) != expected or value.get("type") != "pairing.approval":
             raise PairingError("invalid pairing approval fields")
-        approver = _device_from_dict(value["approver"])
-        approval = cls(
-            str(value["request_id"]), str(value["requester_id"]), approver,
-            TrustedDevice.from_identity(approver, tuple(value["permissions"])).permissions,
-            int(value["timestamp_ms"]), str(value["nonce"]), str(value["signature"]),
-            int(value["version"]),
-        )
-        _validate_permissions(approval.permissions)
+        try:
+            approver = _device_from_dict(value["approver"])
+            permissions = tuple(value["permissions"])
+            _validate_permissions(permissions)
+            normalized = TrustedDevice.from_identity(approver, permissions).permissions
+            approval = cls(
+                str(value["request_id"]), str(value["requester_id"]), approver,
+                normalized, int(value["timestamp_ms"]), str(value["nonce"]),
+                str(value["signature"]), int(value["version"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PairingError("invalid pairing approval values") from exc
         if approval.version != PAIRING_VERSION:
             raise PairingError("unsupported pairing version")
+        approval._validate_bounds()
         return approval
 
 
@@ -236,8 +240,10 @@ def _nonce() -> str:
 
 
 def _validate_nonce(value: str) -> None:
-    if len(_decode(value)) < 16:
-        raise PairingError("pairing nonce must contain at least 128 bits")
+    if len(value) > 128:
+        raise PairingError("pairing nonce is too large")
+    if len(_decode(value)) != 16:
+        raise PairingError("pairing nonce must contain exactly 128 bits")
 
 
 def _b64(value: bytes) -> str:

@@ -35,9 +35,18 @@ def load_server_tls_context(certfile: str | Path, keyfile: str | Path) -> ssl.SS
 def private_ipv4_interfaces() -> tuple[str, ...]:
     """Return concrete private IPv4 addresses, excluding wildcard and loopback."""
     values: set[str] = set()
-    for result in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET, socket.SOCK_STREAM):
-        address = ipaddress.ip_address(result[4][0])
-        if address.is_private and not address.is_loopback:
+    try:
+        results = socket.getaddrinfo(
+            socket.gethostname(), None, socket.AF_INET, socket.SOCK_STREAM
+        )
+    except OSError:
+        return ()
+    for result in results:
+        try:
+            address = ipaddress.ip_address(result[4][0])
+        except (IndexError, TypeError, ValueError):
+            continue
+        if address.is_private and not address.is_loopback and not address.is_unspecified:
             values.add(str(address))
     return tuple(sorted(values))
 
@@ -60,6 +69,8 @@ class TransportConfig:
             address = ipaddress.ip_address(self.host)
         except ValueError as exc:
             raise ValueError("transport host must be a literal IP address") from exc
+        if address.is_unspecified:
+            raise ValueError("ARC3 transport may not bind to a wildcard address")
         if not address.is_loopback:
             if not self.allow_private_lan:
                 raise ValueError("non-loopback binding requires explicit private-LAN approval")
@@ -130,17 +141,24 @@ class ConnectivityHTTPServer:
             )
         except OSError as exc:
             raise RuntimeError("ARC3 Connectivity could not bind its configured address") from exc
-        self._server.daemon_threads = True
-        if self.config.tls_context is not None:
-            self._server.socket = self.config.tls_context.wrap_socket(
-                self._server.socket, server_side=True
+        server = self._server
+        try:
+            server.daemon_threads = True
+            if self.config.tls_context is not None:
+                server.socket = self.config.tls_context.wrap_socket(
+                    server.socket, server_side=True
+                )
+            self._thread = threading.Thread(
+                target=server.serve_forever,
+                name="ARC3-Connectivity-HTTP",
+                daemon=True,
             )
-        self._thread = threading.Thread(
-            target=self._server.serve_forever,
-            name="ARC3-Connectivity-HTTP",
-            daemon=True,
-        )
-        self._thread.start()
+            self._thread.start()
+        except BaseException:
+            self._server = None
+            self._thread = None
+            server.server_close()
+            raise
 
     def stop(self) -> None:
         server, thread = self._server, self._thread

@@ -115,8 +115,8 @@ def _public_key_from_jwk(public_key_jwk: Mapping[str, Any]) -> ec.EllipticCurveP
     # Validate and discard unknown/private fields before decoding coordinates.
     import json
 
-    public_only = json.loads(canonical_public_key(public_key_jwk))
     try:
+        public_only = json.loads(canonical_public_key(public_key_jwk))
         x_value = int.from_bytes(_base64url_decode(public_only["x"]), "big")
         y_value = int.from_bytes(_base64url_decode(public_only["y"]), "big")
         return ec.EllipticCurvePublicNumbers(

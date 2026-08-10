@@ -1,6 +1,7 @@
 import unittest
+from unittest.mock import Mock, patch
 
-from app.connectivity.health import RemoteHealthEndpoint
+from app.connectivity.health import ReadOnlyHealthCollector, RemoteHealthEndpoint
 from app.connectivity.identity import P256IdentityProvider
 from app.connectivity.models import TrustedDevice
 from app.connectivity.permissions import PermissionDenied, PermissionPolicy
@@ -69,6 +70,24 @@ class ConnectivityPermissionHealthTests(unittest.TestCase):
                 self.request("process.list"), trusted, ReplayGuard(), now_ms=NOW
             )
         self.assertEqual(0, collector.calls)
+
+    def test_health_collector_handles_unsupported_battery_probe(self):
+        with patch("app.connectivity.health.psutil.sensors_battery", side_effect=OSError):
+            result = ReadOnlyHealthCollector().collect()
+        self.assertEqual(
+            {"available": False, "percent": None, "plugged_in": None},
+            result["battery"],
+        )
+
+    def test_permission_policy_uses_one_clock_for_replay_recording(self):
+        trusted = TrustedDevice.from_identity(self.identity, ["health.read"])
+        guard = Mock(spec=ReplayGuard)
+        request = self.request()
+        with patch("app.connectivity.permissions.system_clock_ms", return_value=NOW):
+            PermissionPolicy().verify_and_authorize(request, trusted, guard)
+        guard.check_and_record.assert_called_once_with(
+            request.sender_id, request.nonce, request.timestamp_ms, NOW
+        )
 
 
 if __name__ == "__main__":

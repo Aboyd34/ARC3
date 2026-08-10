@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock, patch
 import uuid
 
 from app.connectivity.health import RemoteHealthEndpoint
@@ -12,6 +13,7 @@ from app.connectivity.protocol import SignedRequest
 from app.connectivity.runtime import create_health_transport
 from app.connectivity.transport import (
     ConnectivityHTTPServer, REQUEST_PATH, SignedRequestRouter, TransportConfig,
+    private_ipv4_interfaces,
 )
 from app.connectivity.trusted_devices import TrustedDeviceStore
 
@@ -73,14 +75,20 @@ class ConnectivityTransportTests(unittest.TestCase):
 
     def test_non_loopback_requires_explicit_private_lan_flag(self):
         with self.assertRaisesRegex(ValueError, "explicit private-LAN"):
-            TransportConfig(host="0.0.0.0")
-        with self.assertRaisesRegex(ValueError, "requires TLS"):
+            TransportConfig(host="192.168.1.10")
+        with self.assertRaisesRegex(ValueError, "wildcard"):
             TransportConfig(host="0.0.0.0", allow_private_lan=True)
+        with self.assertRaisesRegex(ValueError, "requires TLS"):
+            TransportConfig(host="192.168.1.10", allow_private_lan=True)
 
     def test_private_lan_runtime_requires_explicit_host(self):
         service = SimpleNamespace(trusted_store=self.store)
         with self.assertRaisesRegex(ValueError, "explicit host address"):
             create_health_transport(service, allow_private_lan=True)
+
+    def test_private_interface_discovery_handles_name_resolution_failure(self):
+        with patch("app.connectivity.transport.socket.getaddrinfo", side_effect=OSError):
+            self.assertEqual((), private_ipv4_interfaces())
 
 
 if __name__ == "__main__":

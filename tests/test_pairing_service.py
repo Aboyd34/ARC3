@@ -31,7 +31,11 @@ class PairingServiceTests(unittest.TestCase):
         )
 
     def tearDown(self):
-        for path in (self.pending_path, self.trusted_path, self.pending_path.with_name("pairing_approval.journal.json")):
+        journal = self.pending_path.with_name("pairing_approval.journal.json")
+        for path in (
+            self.pending_path, self.trusted_path, journal,
+            journal.with_suffix(journal.suffix + ".corrupt"),
+        ):
             if path.exists():
                 path.unlink()
 
@@ -74,6 +78,16 @@ class PairingServiceTests(unittest.TestCase):
         self.assertIsNotNone(recovered.trusted_store.get(self.request.device.device_id))
         self.assertIsNone(self.pending.get(self.request.request_id, now_ms=NOW))
         self.assertFalse(journal.exists())
+
+    def test_corrupt_approval_journal_is_quarantined_without_blocking_startup(self):
+        journal = self.pending_path.with_name("pairing_approval.journal.json")
+        journal.write_text("not-json", encoding="utf-8")
+        recovered = PairingService(
+            self.pending, self.trusted, self.approver, "Office PC", lambda: NOW
+        )
+        self.assertIn("quarantined", recovered.recovery_error)
+        self.assertFalse(journal.exists())
+        self.assertTrue(journal.with_suffix(journal.suffix + ".corrupt").exists())
 
 
 if __name__ == "__main__":
