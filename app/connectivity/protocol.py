@@ -50,7 +50,7 @@ class SignedRequest:
     ) -> "SignedRequest":
         clean_action = _validate_action(action)
         safe_payload = _normalize_payload(payload)
-        timestamp = int((clock_ms or _system_clock_ms)())
+        timestamp = int((clock_ms or system_clock_ms)())
         if timestamp < 0:
             raise ValueError("timestamp cannot be negative")
         nonce = (nonce_factory or _secure_nonce)()
@@ -121,7 +121,7 @@ class SignedRequest:
         self._validate_structure()
         if trusted_device.device_id != self.sender_id:
             raise VerificationError("request sender is not the supplied trusted device")
-        current = _system_clock_ms() if now_ms is None else int(now_ms)
+        current = system_clock_ms() if now_ms is None else int(now_ms)
         if self.timestamp_ms < current - max_age_ms:
             raise VerificationError("request has expired")
         if self.timestamp_ms > current + future_skew_ms:
@@ -173,10 +173,25 @@ class ReplayGuard:
             return
         try:
             value = json.loads(self._path.read_text(encoding="utf-8"))
-            entries = value.get("entries", [])
+            if not isinstance(value, dict) or value.get("schema_version") != 1:
+                raise VerificationError("unsupported replay store schema")
+            entries = value.get("entries")
+            if not isinstance(entries, list):
+                raise VerificationError("replay store entries must be a list")
+            loaded: list[tuple[tuple[str, str], int]] = []
             for item in entries:
-                self._seen[(str(item["sender_id"]), str(item["nonce"]))] = int(item["timestamp_ms"])
-        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+                if not isinstance(item, dict):
+                    raise VerificationError("replay store entry is invalid")
+                loaded.append(((str(item["sender_id"]), str(item["nonce"])), int(item["timestamp_ms"])))
+            cutoff = system_clock_ms() - self.retention_ms
+            for key, timestamp in sorted(loaded, key=lambda item: item[1]):
+                if timestamp >= cutoff:
+                    self._seen[key] = timestamp
+            while len(self._seen) > self.max_entries:
+                self._seen.popitem(last=False)
+        except VerificationError:
+            raise
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, json.JSONDecodeError) as exc:
             raise VerificationError("replay store is unreadable") from exc
 
     def _save(self) -> None:
@@ -232,7 +247,7 @@ def _secure_nonce() -> str:
     return _base64url(secrets.token_bytes(16))
 
 
-def _system_clock_ms() -> int:
+def system_clock_ms() -> int:
     return time.time_ns() // 1_000_000
 
 

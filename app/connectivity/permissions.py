@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from .models import TrustedDevice
-from .protocol import ReplayGuard, SignedRequest, VerificationError
+from .protocol import ReplayGuard, SignedRequest, VerificationError, system_clock_ms
 
 
 class PermissionDenied(VerificationError):
@@ -37,12 +37,12 @@ class PermissionPolicy:
         *,
         now_ms: int | None = None,
     ) -> AuthorizedRequest:
-        request.verify(trusted_device, replay_guard, now_ms=now_ms, record_replay=False)
+        current = system_clock_ms() if now_ms is None else int(now_ms)
+        request.verify(trusted_device, replay_guard, now_ms=current, record_replay=False)
         permission = self._action_permissions.get(request.action)
         if permission is None:
             raise PermissionDenied(f"remote action is not registered: {request.action}")
         if permission not in trusted_device.permissions:
             raise PermissionDenied(f"trusted device lacks permission: {permission}")
-        current = request.timestamp_ms if now_ms is None else int(now_ms)
         replay_guard.check_and_record(request.sender_id, request.nonce, request.timestamp_ms, current)
         return AuthorizedRequest(request, trusted_device, permission)

@@ -70,6 +70,23 @@ class ConnectivityPairingTests(unittest.TestCase):
                 nonce_factory=lambda: APPROVAL_NONCE,
             )
 
+    def test_approval_rejects_oversized_signature_during_deserialization(self):
+        approval = PairingApproval.create(
+            self.request, self.approver, "Office PC", ("health.read",),
+            clock_ms=lambda: NOW, nonce_factory=lambda: APPROVAL_NONCE,
+        ).to_dict()
+        approval["signature"] = "A" * 513
+        with self.assertRaisesRegex(PairingError, "signature is too large"):
+            PairingApproval.from_dict(approval)
+
+    def test_pairing_nonce_must_be_exactly_128_bits(self):
+        oversized = PairingRequest(
+            self.request.device, self.request.timestamp_ms,
+            "MDEyMzQ1Njc4OWFiY2RlZmd", self.request.signature,
+        )
+        with self.assertRaisesRegex(PairingError, "exactly 128 bits"):
+            oversized.verify(now_ms=NOW)
+
 
 if __name__ == "__main__":
     unittest.main()

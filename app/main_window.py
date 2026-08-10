@@ -104,7 +104,8 @@ class MainWindow(QMainWindow):
             )
         )
 
-        self.pages.addWidget(ConnectivityPage(self))
+        self.connectivity_page = ConnectivityPage(self)
+        self.pages.addWidget(self.connectivity_page)
 
         self.pages.addWidget(SettingsPage(self))
 
@@ -262,6 +263,9 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(saved_geometry)
 
     def closeEvent(self, event):
+        connectivity_page = getattr(self, "connectivity_page", None)
+        if connectivity_page is not None:
+            connectivity_page.shutdown()
         running_threads = [
             thread for thread in self.findChildren(QThread)
             if thread.isRunning()
