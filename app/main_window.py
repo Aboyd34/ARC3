@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (
 from app.pages.dashboard_page import DashboardPage
 from app.pages.android_workspace import AndroidWorkspace
 from app.pages.connectivity_page import ConnectivityPage
+from app.pages.developer_page import DeveloperPage
+from app.pages.files_page import FilesPage
 from app.pages.settings_page import SettingsPage
 from app.pages.windows.windows_workspace import WindowsWorkspace
 from app.settings import AppSettings
@@ -84,25 +86,9 @@ class MainWindow(QMainWindow):
             )
         )
 
-        self.pages.addWidget(
-            PlaceholderPage(
-                "File Tools",
-                (
-                    "Search, hashing, duplicate detection, "
-                    "and bulk operations."
-                ),
-            )
-        )
+        self.pages.addWidget(FilesPage())
 
-        self.pages.addWidget(
-            PlaceholderPage(
-                "Developer Tools",
-                (
-                    "PowerShell, Python, Git, and "
-                    "environment utilities."
-                ),
-            )
-        )
+        self.pages.addWidget(DeveloperPage())
 
         self.connectivity_page = ConnectivityPage(self)
         self.pages.addWidget(self.connectivity_page)
