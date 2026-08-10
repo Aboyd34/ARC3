@@ -447,7 +447,6 @@ class WindowsDeviceTabTests(unittest.TestCase):
         self.assertIsNone(tab.pending_action)
         tab.close()
 
-
 class MainWindowLifecycleTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
